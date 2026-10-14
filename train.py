@@ -16,12 +16,29 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
+from features import FeatureConfig, temperature_for_dates
 from inference import resolve_device
 from models import get_model
-from preprocessing import load_and_prepare
+from preprocessing import load_and_prepare, load_consumption
 
 DEFAULT_DATA = "data/processed/daily_consumption.csv"
 DEFAULT_ARTIFACTS = "artifacts"
+
+
+def resolve_feature_config(args: argparse.Namespace) -> FeatureConfig:
+    """Map the --features switch onto a FeatureConfig.
+
+    ``calendar`` turns on calendar+holiday blocks; ``weather`` additionally adds
+    temperature. ``--no-holidays`` drops the holiday flag from either.
+    """
+    if args.features == "none":
+        return FeatureConfig()
+    return FeatureConfig(
+        calendar=True,
+        holidays=not args.no_holidays,
+        temperature=args.features == "weather",
+        city=args.city,
+    )
 
 
 def set_seed(seed: int) -> None:
@@ -72,6 +89,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     p.add_argument("--artifacts-dir", default=DEFAULT_ARTIFACTS)
     p.add_argument(
+        "--features",
+        choices=["none", "calendar", "weather"],
+        default="none",
+        help="exogenous features: 'calendar' adds calendar+holiday, 'weather' also temperature",
+    )
+    p.add_argument("--city", default="delhi", help="city for temperature features")
+    p.add_argument(
+        "--no-holidays",
+        action="store_true",
+        help="drop the holiday flag from the calendar feature set",
+    )
+    p.add_argument(
+        "--weather-file",
+        default=None,
+        help="pre-fetched weather CSV to use instead of the Open-Meteo cache",
+    )
+    p.add_argument(
         "--splits",
         type=float,
         nargs=3,
@@ -93,6 +127,15 @@ def main(args: argparse.Namespace | None = None) -> None:
     artifacts = Path(args.artifacts_dir)
     artifacts.mkdir(parents=True, exist_ok=True)
     scaler_path = artifacts / "scaler.joblib"
+    feature_scaler_path = artifacts / "feature_scaler.joblib"
+
+    feature_config = resolve_feature_config(args)
+    temperature = None
+    if feature_config.temperature:
+        raw = load_consumption(args.data)
+        temperature = temperature_for_dates(
+            feature_config, raw.index, weather_file=args.weather_file
+        )
 
     prepared = load_and_prepare(
         args.data,
@@ -101,13 +144,21 @@ def main(args: argparse.Namespace | None = None) -> None:
         splits=tuple(args.splits),
         scaler_path=scaler_path,
         save_scaler=True,
+        feature_config=feature_config,
+        temperature=temperature,
+        feature_scaler_path=feature_scaler_path,
     )
     data = prepared["datasets"]
+    feature_columns = prepared["feature_columns"]
     X_train, y_train = data["train"]["X"], data["train"]["y"]
     X_val, y_val = data["val"]["X"], data["val"]["y"]
 
     print(f"Device : {device}")
     print(f"Model  : {args.model.upper()}  (window={args.window}, horizon={args.horizon})")
+    if feature_columns:
+        print(f"Features ({len(feature_columns)}): {', '.join(feature_columns)}")
+    else:
+        print("Features: none")
     print(f"Train  : {X_train.shape}   Val: {X_val.shape}")
     if len(X_train) == 0:
         raise SystemExit("No training windows produced - dataset too short.")
@@ -126,7 +177,7 @@ def main(args: argparse.Namespace | None = None) -> None:
     val_loader = make_loader(X_val, y_val, args.batch_size, shuffle=False)
 
     model_config = {
-        "input_size": 1,
+        "input_size": 1 + len(feature_columns),
         "hidden1": 64,
         "hidden2": 32,
         "dropout": 0.2,
@@ -199,6 +250,10 @@ def main(args: argparse.Namespace | None = None) -> None:
         "data_path": str(args.data),
         "seed": args.seed,
         "deterministic": args.deterministic,
+        "feature_config": feature_config.to_dict(),
+        "feature_columns": feature_columns,
+        "feature_scaler_path": str(feature_scaler_path) if feature_columns else None,
+        "city": feature_config.city,
     }
     model_path = artifacts / "best_model.pt"
     torch.save(ckpt, model_path)
@@ -206,6 +261,8 @@ def main(args: argparse.Namespace | None = None) -> None:
     print(f"\nBest val loss : {best_val:.5f}")
     print(f"Model saved   : {model_path}")
     print(f"Scaler saved  : {scaler_path}")
+    if feature_columns:
+        print(f"Feat scaler   : {feature_scaler_path}")
 
 
 if __name__ == "__main__":

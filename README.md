@@ -112,6 +112,56 @@ The original scripts keep working directly (`python train.py …`).
 
 ---
 
+## Weather & features
+
+The forecaster can consume **exogenous daily features** in addition to the
+consumption history. They are appended as extra input channels to every window
+(channel 0 stays consumption), so the same GRU/LSTM trains on them with only its
+`input_size` adjusted. Select a set with `--features`:
+
+| `--features` | Adds | Columns |
+| --- | --- | --- |
+| `none` (default) | nothing | – |
+| `calendar` | calendar + Indian public holidays | `dow_sin`, `dow_cos`, `month_sin`, `month_cos`, `is_weekend`, `is_holiday` |
+| `weather` | calendar + holidays + Open-Meteo temperature | `temp_mean`, `temp_lag1..3`, `temp_roll7`, `cdd` |
+
+```bash
+bijli train --features calendar          # offline (calendar + holidays)
+bijli train --features weather --city mumbai
+bijli train --features weather --weather-file data/raw/weather/delhi.csv  # offline
+```
+
+* **Weather** is fetched from the [Open-Meteo](https://open-meteo.com/) archive
+  API, cached per city at `data/raw/weather/<city>.csv`, and used at forecast
+  time via the forecast API with a day-of-year **climatology fallback** for dates
+  beyond the 16-day forecast window. `--weather-file` bypasses the network
+  entirely. Known cities: `delhi`, `mumbai`, `kolkata`, `chennai`, `bengaluru`,
+  `hyderabad`, `pune`, `ahmedabad`, `jaipur`, `lucknow` (+ aliases like `bombay`).
+* **No leakage**: calendar/holiday flags are deterministic from the date; the
+  consumption scaler and the separate **feature scaler**
+  (`artifacts/feature_scaler.joblib`) are both fit on the train split only. The
+  feature config is persisted in the checkpoint, and `evaluate.py` / `predict.py`
+  rebuild byte-identical inputs — a parity test asserts this
+  (`tests/test_features.py::test_train_eval_predict_feature_parity`).
+* The 7-day horizon uses real forecast temperatures; the 90-day rollout falls
+  back to climatology as it extends past the forecast window.
+
+**Measured effect** on the synthetic dataset (GRU, window 30 / horizon 7,
+deterministic, same seed; test-split WAPE):
+
+| Features | MAE | WAPE | vs. seasonal-naive |
+| --- | --- | --- | --- |
+| `none` | 0.691 | 10.57% | –24.4% |
+| `calendar` | **0.637** | **9.75%** | **–30.3%** |
+| `weather` | 0.704 | 10.77% | –22.9% |
+
+Calendar + holiday features cut WAPE by ~0.8pp. Temperature did **not** help
+here: the synthetic generator encodes a pure annual cycle with no weather
+coupling, so the six temperature channels add noise — a deliberate reminder to
+let the data, not intuition, pick features.
+
+---
+
 ## Using real data
 
 The pipeline is dataset-agnostic: any CSV with a date column and a consumption
@@ -284,15 +334,17 @@ On the default synthetic dataset the GRU meaningfully beats both baselines
 bijli-predict-ai/
 ├── .github/workflows/ci.yml     # ruff + pytest on Python 3.12 / 3.14
 ├── data/
-│   ├── raw/                     # source CSVs (synthetic or iAWE)
+│   ├── raw/                     # source CSVs (synthetic or iAWE) + weather/ cache
 │   ├── processed/               # daily_consumption.csv
 │   └── sample_input.csv         # last 30 days, used by predict.py
 ├── notebooks/exploration.ipynb  # lightweight EDA
 ├── models/
 │   ├── gru_model.py             # primary model
 │   └── lstm_model.py            # comparison model
-├── tests/                       # pytest suite (cli, tariffs, preprocessing, inference)
-├── artifacts/                   # best_model.pt, scaler.joblib
+├── tests/                       # pytest suite (cli, tariffs, preprocessing,
+│                                #   inference, weather, features)
+├── artifacts/                   # best_model.pt, scaler.joblib,
+│                                #   feature_scaler.joblib
 ├── outputs/                     # predictions.csv, forecast.png, evaluation.json,
 │                                #   cost_forecast.png, cost_projection.png,
 │                                #   projection_90d.csv, cost_summary.json,
@@ -301,6 +353,8 @@ bijli-predict-ai/
 ├── config.toml                  # hyperparameters / defaults (tomllib)
 ├── tariff_presets.toml          # named discom tariffs
 ├── preprocessing.py             # load / clean / split / window / scale
+├── features.py                  # calendar / holiday / temperature features
+├── weather.py                   # Open-Meteo archive + forecast + climatology
 ├── generate_data.py             # synthetic Indian household generator
 ├── iawe_ingest.py               # real iAWE -> daily kWh
 ├── tariffs.py                   # flat / slab / preset / fixed / tax bill calculation

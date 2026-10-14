@@ -11,6 +11,7 @@ dependencies = [
     "matplotlib==3.11.2",
     "joblib==1.6.0",
     "openpyxl==3.1.5",
+    "holidays==0.106",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +39,7 @@ packages = ["models"]
 py-modules = [
     "cli",
     "evaluate",
+    "features",
     "generate_data",
     "iawe_ingest",
     "inference",
@@ -46,6 +48,7 @@ py-modules = [
     "report",
     "tariffs",
     "train",
+    "weather",
 ]
 
 # Resolve PyTorch from the CPU wheel index so `uv.lock` is reproducible on

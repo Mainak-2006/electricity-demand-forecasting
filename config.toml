@@ -27,6 +27,8 @@ seed = 42
 deterministic = true
 device = "auto"
 splits = [0.70, 0.15, 0.15]
+features = "none"      # none | calendar | weather (see "Weather & features")
+city = "delhi"         # city for --features weather temperature
 
 [evaluate]
 device = "cpu"

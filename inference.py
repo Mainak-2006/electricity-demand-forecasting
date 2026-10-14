@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from features import FeatureConfig, stack_window
 from models import get_model
 
 
@@ -53,3 +54,37 @@ def predict(model, X: np.ndarray, device: torch.device, batch_size: int = 256) -
             xb = torch.from_numpy(X[i : i + batch_size]).to(device)
             outs.append(model(xb).cpu().numpy())
     return np.concatenate(outs, axis=0) if outs else np.empty((0,))
+
+
+def feature_info(ckpt: dict) -> tuple[FeatureConfig, list[str], str | None]:
+    """Recover the exogenous-feature metadata persisted in a checkpoint.
+
+    Older checkpoints predate features, so every field defaults to a no-op
+    config, an empty column list and no feature scaler.
+    """
+    config = FeatureConfig.from_dict(ckpt.get("feature_config"))
+    columns = list(ckpt.get("feature_columns") or [])
+    scaler_path = ckpt.get("feature_scaler_path")
+    return config, columns, scaler_path
+
+
+def make_model_input(
+    scaler,
+    feature_scaler,
+    consumptions: np.ndarray,
+    feature_window: np.ndarray | None = None,
+) -> np.ndarray:
+    """Build a single ``(1, input_len, 1 + n_exog)`` model input tensor.
+
+    `consumptions` are raw kWh (scaled here with the consumption `scaler`);
+    `feature_window` is the *raw* exogenous block for the same days (scaled here
+    with `feature_scaler`). This is the one place train/evaluate/predict share,
+    so the channel layout can never drift between them.
+    """
+    cons = np.asarray(consumptions, dtype=float).reshape(-1, 1)
+    scaled = scaler.transform(cons)
+    if feature_window is None or feature_scaler is None:
+        feats = None
+    else:
+        feats = feature_scaler.transform(np.asarray(feature_window, dtype=float))
+    return stack_window(scaled, feats)[None].astype(np.float32)

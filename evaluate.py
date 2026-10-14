@@ -23,8 +23,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from inference import load_model, predict, resolve_device
-from preprocessing import load_and_prepare, load_scaler
+from features import temperature_for_dates
+from inference import feature_info, load_model, predict, resolve_device
+from preprocessing import load_and_prepare, load_consumption, load_scaler
 
 DEFAULT_DATA = "data/processed/daily_consumption.csv"
 DEFAULT_ARTIFACTS = "artifacts"
@@ -53,6 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out-dir", default=DEFAULT_OUTPUTS)
     p.add_argument("--device", default="cpu", choices=["auto", "cpu", "cuda"])
     p.add_argument("--splits", type=float, nargs=3, default=(0.70, 0.15, 0.15))
+    p.add_argument(
+        "--weather-file",
+        default=None,
+        help="pre-fetched weather CSV to use instead of the Open-Meteo cache",
+    )
     return p
 
 
@@ -68,6 +74,19 @@ def main(args: argparse.Namespace | None = None) -> None:
     input_len, horizon = ckpt["input_len"], ckpt["horizon"]
     scaler = load_scaler(args.scaler_path)
 
+    feature_config, feature_columns, feature_scaler_path = feature_info(ckpt)
+    feature_scaler = None
+    temperature = None
+    if feature_columns:
+        if feature_scaler_path is None:
+            raise SystemExit("Checkpoint expects features but records no feature scaler path.")
+        feature_scaler = load_scaler(feature_scaler_path)
+        if feature_config.temperature:
+            raw = load_consumption(args.data)
+            temperature = temperature_for_dates(
+                feature_config, raw.index, weather_file=args.weather_file
+            )
+
     prepared = load_and_prepare(
         args.data,
         input_len=input_len,
@@ -75,6 +94,9 @@ def main(args: argparse.Namespace | None = None) -> None:
         splits=tuple(args.splits),
         save_scaler=False,
         scaler=scaler,
+        feature_config=feature_config,
+        temperature=temperature,
+        feature_scaler=feature_scaler,
     )
     X_test = prepared["datasets"]["test"]["X"]
     y_test = prepared["datasets"]["test"]["y"]
@@ -90,8 +112,8 @@ def main(args: argparse.Namespace | None = None) -> None:
     y_true = inv(y_test)
     y_pred = np.clip(inv(pred_scaled), 0.0, None)  # consumption is non-negative
 
-    # --- Baselines (from the raw input window) ---
-    X_raw = inv(X_test)
+    # --- Baselines (from the raw consumption channel of the input window) ---
+    X_raw = inv(X_test[:, :, 0])
     seasonal_naive = X_raw[:, -horizon:]  # repeat last week
     persistence = np.repeat(X_raw[:, -1:], horizon, axis=1)  # repeat last day
 

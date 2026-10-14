@@ -33,7 +33,8 @@ import numpy as np
 import pandas as pd
 import torch
 
-from inference import load_model, resolve_device
+from features import build_feature_matrix, temperature_for_dates
+from inference import feature_info, load_model, make_model_input, resolve_device
 from preprocessing import clean_series, load_consumption, load_scaler
 from report import build_excel
 from tariffs import (
@@ -113,6 +114,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="multi-sheet Excel report path (empty to skip)",
     )
     p.add_argument("--device", default="cpu", choices=["auto", "cpu", "cuda"])
+    p.add_argument(
+        "--weather-file",
+        default=None,
+        help="pre-fetched weather CSV for temperature features (checkpoint-dependent)",
+    )
     return p
 
 
@@ -179,24 +185,46 @@ def rolling_forecast(
     horizon: int,
     total_days: int,
     device: torch.device,
+    *,
+    feature_scaler=None,
+    history_features: np.ndarray | None = None,
+    future_features: np.ndarray | None = None,
 ) -> list[float]:
     """Autoregressive multi-step forecast.
 
     Repeatedly runs the fixed-horizon model and feeds predictions back as input
     until `total_days` daily values are produced. The first `horizon` values are
     identical to a single direct forecast from the same window.
+
+    When the checkpoint was trained on exogenous features, pass the **raw**
+    `history_features` (``input_len`` rows, aligned to the input window) and
+    `future_features` (``total_days`` rows for the days being forecast); they are
+    scaled with `feature_scaler` and advanced in lockstep as the window slides.
     """
     values = [float(v) for v in history_kwh]
     preds: list[float] = []
+
+    feat_all = None
+    if feature_scaler is not None and history_features is not None and future_features is not None:
+        feat_all = np.vstack(
+            [
+                np.asarray(history_features, dtype=float),
+                np.asarray(future_features, dtype=float),
+            ]
+        )
+
+    p = 0  # number of future daily values appended so far
     while len(preds) < total_days:
         window = np.asarray(values[-input_len:], dtype=float)
-        x = scaler.transform(window.reshape(-1, 1)).reshape(1, input_len, 1).astype("float32")
+        fwin = feat_all[p : p + input_len] if feat_all is not None else None
+        x = make_model_input(scaler, feature_scaler, window, fwin)
         with torch.no_grad():
             p_scaled = model(torch.from_numpy(x).to(device)).cpu().numpy()
         step = scaler.inverse_transform(p_scaled.reshape(-1, 1)).reshape(-1)
         step = [max(0.0, float(v)) for v in step]
         preds.extend(step)
         values.extend(step)
+        p += len(step)
     return preds[:total_days]
 
 
@@ -265,6 +293,35 @@ def main(args: argparse.Namespace | None = None) -> None:
     last_date = window.index[-1]
     project_days = max(args.project_days, horizon)
 
+    # --- Exogenous features (only if the checkpoint was trained with them) ---
+    feature_config, feature_columns, feature_scaler_path = feature_info(ckpt)
+    feature_scaler = None
+    history_features = future_features = None
+    if feature_columns:
+        if feature_scaler_path is None:
+            raise SystemExit("Checkpoint expects features but records no feature scaler path.")
+        feature_scaler = load_scaler(feature_scaler_path)
+        window_dates = window.index
+        future_dates = pd.date_range(
+            last_date + pd.Timedelta(days=1), periods=project_days, freq="D"
+        )
+        feat_start = window_dates[0] - pd.Timedelta(days=feature_config.buffer_days)
+        full_dates = pd.date_range(feat_start, future_dates[-1], freq="D")
+        temperature = None
+        if feature_config.temperature:
+            temperature = temperature_for_dates(
+                feature_config, full_dates, weather_file=args.weather_file
+            )
+        feature_matrix, columns = build_feature_matrix(
+            full_dates, temperature=temperature, config=feature_config
+        )
+        if columns != feature_columns:
+            raise SystemExit(
+                f"Feature mismatch: model expects {feature_columns} but built {columns}."
+            )
+        history_features = feature_matrix.loc[window_dates].to_numpy()
+        future_features = feature_matrix.loc[future_dates].to_numpy()
+
     # One rolling forecast covers both the 7-day output and the projection;
     # its first `horizon` values are the direct 7-day forecast.
     projection = rolling_forecast(
@@ -275,6 +332,9 @@ def main(args: argparse.Namespace | None = None) -> None:
         horizon,
         project_days,
         device,
+        feature_scaler=feature_scaler,
+        history_features=history_features,
+        future_features=future_features,
     )
     forecast = projection[:horizon]
     dates = pd.date_range(last_date + pd.Timedelta(days=1), periods=horizon, freq="D")

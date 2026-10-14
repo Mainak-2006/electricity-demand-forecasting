@@ -13,6 +13,13 @@ Public API:
     chronological_split(df, ...)           -> {'train','val','test'} DataFrames
     make_windows(arr, input_len, horizon)  -> (X, y) numpy arrays
     load_and_prepare(path, ...)            -> prepared arrays + scaler + frames
+
+Exogenous features (calendar / holidays / temperature, see `features.py`) are
+threaded through as optional extra input channels: when a `FeatureConfig` is
+supplied, `make_windows` returns X of shape ``(n, input_len, 1 + n_exog)`` and a
+separate train-only ``feature_scaler`` standardises the exogenous columns. The
+consumption scaler remains fit on the train segment only, so the leakage guards
+above are unchanged.
 """
 
 from __future__ import annotations
@@ -23,6 +30,8 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
+
+from features import FeatureConfig, build_feature_matrix
 
 DEFAULT_INPUT_LEN = 30
 DEFAULT_HORIZON = 7
@@ -147,11 +156,18 @@ def chronological_split(
 
 
 def make_windows(
-    values: np.ndarray, input_len: int = DEFAULT_INPUT_LEN, horizon: int = DEFAULT_HORIZON
+    values: np.ndarray,
+    input_len: int = DEFAULT_INPUT_LEN,
+    horizon: int = DEFAULT_HORIZON,
+    features: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build sliding (input_len -> horizon) windows.
 
-    X: (n_samples, input_len, 1)   y: (n_samples, horizon)
+    With ``features=None``:      X: (n_samples, input_len, 1)      y: (n_samples, horizon)
+    With ``features`` (n, k):    X: (n_samples, input_len, 1 + k)  y: (n_samples, horizon)
+
+    Channel 0 of X is the (scaled) consumption window; channels 1..k are the
+    exogenous features aligned to the same timestamps.
     """
     values = np.asarray(values, dtype=np.float32).reshape(-1)
     n = len(values)
@@ -159,10 +175,22 @@ def make_windows(
     if n_windows <= 0:
         raise ValueError(f"Series too short ({n}) for window={input_len} + horizon={horizon}.")
 
-    X = np.empty((n_windows, input_len, 1), dtype=np.float32)
+    if features is None:
+        n_feat = 0
+    else:
+        features = np.asarray(features, dtype=np.float32)
+        if features.ndim == 1:
+            features = features.reshape(-1, 1)
+        if len(features) != n:
+            raise ValueError(f"features length {len(features)} != series length {n}.")
+        n_feat = features.shape[1]
+
+    X = np.empty((n_windows, input_len, 1 + n_feat), dtype=np.float32)
     y = np.empty((n_windows, horizon), dtype=np.float32)
     for i in range(n_windows):
         X[i, :, 0] = values[i : i + input_len]
+        if n_feat:
+            X[i, :, 1:] = features[i : i + input_len]
         y[i] = values[i + input_len : i + input_len + horizon]
     return X, y
 
@@ -180,6 +208,10 @@ def load_and_prepare(
     save_scaler: bool = True,
     scaler: StandardScaler | None = None,
     fill_limit: int = 14,
+    feature_config: FeatureConfig | None = None,
+    temperature: pd.DataFrame | None = None,
+    feature_scaler: StandardScaler | None = None,
+    feature_scaler_path: str | Path | None = None,
 ) -> dict:
     """Full preprocessing pipeline: load -> clean -> split -> scale -> window.
 
@@ -187,7 +219,12 @@ def load_and_prepare(
     (used by evaluate/predict to reuse the exact training-time scaling). Gap
     filling is applied per split segment, so validation/test values can never be
     interpolated into the training segment. Returns a dict with per-split X/y
-    arrays, the fitted scaler, and the split frames.
+    arrays, the fitted scalers, the split frames and (when a `feature_config` is
+    given) the exogenous feature matrix.
+
+    `temperature` must cover the whole series **plus** `feature_config.buffer_days`
+    of leading context; the same `feature_scaler`/`feature_config` must be reused
+    at evaluation/prediction time to guarantee identical inputs.
     """
     deduped = _dedupe_series(load_consumption(path))
     raw_frames = chronological_split(deduped.to_frame(name="consumption_kwh"), *splits)
@@ -201,26 +238,54 @@ def load_and_prepare(
         train_vals = frames["train"]["consumption_kwh"].to_numpy()
         scaler = StandardScaler().fit(train_vals.reshape(-1, 1))
 
+    # --- Exogenous feature matrix (optional) ---
+    feature_columns: list[str] = []
+    feature_matrix: pd.DataFrame | None = None
+    features_scaled = pd.DataFrame(index=series.index)
+    if feature_config is not None and feature_config.enabled:
+        feature_matrix, feature_columns = build_feature_matrix(
+            series.index, temperature=temperature, config=feature_config
+        )
+        if feature_scaler is None:
+            feature_scaler = StandardScaler().fit(
+                feature_matrix.loc[frames["train"].index].to_numpy()
+            )
+        features_scaled = pd.DataFrame(
+            feature_scaler.transform(feature_matrix.to_numpy()),
+            index=series.index,
+            columns=feature_columns,
+        )
+
+    n_channels = 1 + len(feature_columns)
     datasets: dict[str, dict[str, np.ndarray]] = {}
     for name, frame in frames.items():
         scaled = _scale(frame["consumption_kwh"].to_numpy(), scaler)
+        feats = features_scaled.loc[frame.index].to_numpy() if feature_columns else None
         try:
-            X, y = make_windows(scaled, input_len, horizon)
+            X, y = make_windows(scaled, input_len, horizon, features=feats)
             datasets[name] = {"X": X, "y": y}
         except ValueError:
             # A segment shorter than one window cannot produce samples.
             datasets[name] = {
-                "X": np.empty((0, input_len, 1), dtype=np.float32),
+                "X": np.empty((0, input_len, n_channels), dtype=np.float32),
                 "y": np.empty((0, horizon), dtype=np.float32),
             }
 
     if save_scaler and scaler_path is not None:
         Path(scaler_path).parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(scaler, scaler_path)
+    if save_scaler and feature_scaler is not None and feature_scaler_path is not None:
+        Path(feature_scaler_path).parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(feature_scaler, feature_scaler_path)
 
     return {
         "datasets": datasets,
         "scaler": scaler,
+        "feature_scaler": feature_scaler,
+        "features": feature_matrix,
+        "features_scaled": features_scaled,
+        "feature_columns": feature_columns,
+        "feature_config": feature_config,
         "frames": frames,
         "series": series,
         "input_len": input_len,
