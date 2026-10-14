@@ -91,6 +91,32 @@ def test_cli_dispatches_every_command(monkeypatch, command):
     assert "args" in called
 
 
+def test_ablation_and_tune_registered():
+    assert "ablation" in cli.COMMANDS
+    assert "tune" in cli.COMMANDS
+
+
+def test_tune_config_defaults_applied():
+    parser = cli.build_parser(
+        "tune", importlib.import_module("tune"), {"tune": {"trials": 5, "model": "lstm"}}
+    )
+    args = parser.parse_args([])
+    assert args.trials == 5
+    assert args.model == "lstm"
+
+
+def test_ablation_config_defaults_applied():
+    parser = cli.build_parser(
+        "ablation",
+        importlib.import_module("ablation"),
+        {"ablation": {"models": ["gru"], "features": ["none"], "epochs": 3}},
+    )
+    args = parser.parse_args([])
+    assert args.models == ["gru"]
+    assert args.features == ["none"]
+    assert args.epochs == 3
+
+
 def test_cli_unknown_command_exits():
     with pytest.raises(SystemExit):
         cli.main(["frobnicate"])

@@ -100,6 +100,8 @@ The scripts are also wrapped behind one entry point, installed as `bijli`
 ```bash
 bijli data          # generate the synthetic dataset
 bijli train         # train the forecaster (deterministic by default)
+bijli ablation      # compare architectures against feature sets on one split
+bijli tune          # random hyperparameter search (best validation loss)
 bijli evaluate      # metrics on the held-out test split
 bijli predict       # 7-day forecast + bill + 90-day projection + reports
 bijli report        # rebuild the Excel + HTML reports from outputs/
@@ -162,21 +164,67 @@ bijli train --features weather --weather-file data/raw/weather/delhi.csv  # offl
 * The 7-day horizon uses real forecast temperatures; the 90-day rollout falls
   back to climatology as it extends past the forecast window.
 
-**Measured effect** on the synthetic dataset (GRU, window 30 / horizon 7,
-`--deterministic`, seed 42; test-split WAPE):
+**Measured effect** on the synthetic dataset (60 epochs, patience 10, seed 42;
+test-split metrics, `bijli ablation --models gru,lstm --features none,calendar,weather`):
 
-| Features | MAE | WAPE | vs. seasonal-naive |
-| --- | --- | --- | --- |
-| `none` | 0.703 | 10.76% | –23.0% |
-| `calendar` | 0.699 | 10.70% | –23.4% |
-| `weather` | 0.709 | 10.85% | –22.3% |
+| Model | Features | MAE | RMSE | WAPE | vs. seasonal-naive |
+| --- | --- | --- | --- | --- | --- |
+| GRU | `none` | 0.749 | 1.021 | 16.95% | –18.5% |
+| GRU | `calendar` | 0.667 | 0.911 | **15.09%** | –27.5% |
+| GRU | `weather` | 0.684 | 0.907 | 15.47% | –25.6% |
+| LSTM | `none` | 0.900 | 1.154 | 20.38% | –2.1% |
+| LSTM | `calendar` | 0.732 | 0.940 | 16.56% | –20.4% |
+| LSTM | `weather` | 0.715 | 0.922 | 16.19% | –22.2% |
 
-Under the deterministic default the calendar/holiday features give only a
-**marginal** gain (10.70% vs 10.76% WAPE); temperature does **not** help here —
-the synthetic generator encodes a pure annual cycle with no weather coupling, so
-the six temperature channels add noise. A deliberate reminder to let the data,
-not intuition, pick features. (An earlier, non-deterministic comparison showed a
-larger calendar gain; that was run-to-run variance, not signal.)
+The generator now couples load to a synthetic temperature series
+(`generate_data.py`), so the six temperature channels **help** relative to
+`none`, though the deterministic calendar/holiday block remains the single
+strongest addition. The GRU beats the LSTM on every feature set. Let the
+ablation, not intuition, pick the features: run `bijli ablation` after any
+change to the data generator.
+
+---
+
+## Ablation & tuning
+
+Two experiment commands share the exact training loop, seeding and checkpoint
+selection as `bijli train` (via `train.fit_model`), so results are comparable:
+
+* **`bijli ablation`** trains one model per (architecture × feature-set)
+  combination on the *same* split and scores each on the held-out test windows,
+  next to a seasonal-naive floor. It answers "which design choices actually
+  pull their weight?".
+* **`bijli tune`** runs a random search over the learning rate (log-uniform),
+  batch size and the GRU/LSTM hidden sizes/widths, keeping the configuration
+  with the lowest validation loss, then optionally retrains and saves it as a
+  standard checkpoint.
+
+```bash
+bijli ablation --models gru,lstm --features none,calendar,weather --epochs 60
+bijli tune --trials 16 --epochs 60 --features calendar --save-artifacts artifacts
+```
+
+Both write a JSON result plus a flat CSV and (for ablation) a PNG chart to
+`outputs/ablation/` and `outputs/tuning/`, read defaults from the `[ablation]`
+and `[tune]` sections of `config.toml`, and record a run manifest.
+
+Full ablation on the coupled synthetic dataset (60 epochs, patience 10, seed 42):
+
+| Model | Features | Params | MAE | RMSE | WAPE | vs. naive |
+| --- | --- | --- | --- | --- | --- | --- |
+| GRU | `calendar` | 24,711 | 0.667 | 0.911 | **15.09%** | –27.5% |
+| GRU | `weather` | 25,863 | 0.684 | 0.907 | 15.47% | –25.6% |
+| LSTM | `weather` | 34,055 | 0.715 | 0.922 | 16.19% | –22.2% |
+| LSTM | `calendar` | 32,519 | 0.732 | 0.940 | 16.56% | –20.4% |
+| GRU | `none` | 23,559 | 0.749 | 1.021 | 16.95% | –18.5% |
+| LSTM | `none` | 30,983 | 0.900 | 1.154 | 20.38% | –2.1% |
+
+The random search (16 trials, GRU, `calendar`) selected
+`lr ≈ 2.14e-3, batch_size = 64, hidden1 = 64, hidden2 = 48, dropout = 0.1,
+dense = 64`. The retrained model scores **15.01% WAPE** on the test split
+(`bijli evaluate`) — ahead of ETS (15.05%), SARIMAX (17.88%), seasonal-naive
+(20.81%) and persistence (28.04%), and marginally better than the untuned
+default.
 
 ---
 
@@ -398,6 +446,8 @@ controls structured progress logging (stderr) independently of stdout reports.
 | `outputs/bijli_report.html` | Self-contained HTML report (auto-built by `predict.py` / `report.py`) |
 | `outputs/evaluation.json` | MAE / RMSE / WAPE, baseline comparison, coverage |
 | `outputs/evaluation_cv.json` | Per-fold + mean/std metrics (`evaluate.py --cv rolling`) |
+| `outputs/ablation/` | Ablation JSON + CSV + WAPE chart (`ablation.py`) |
+| `outputs/tuning/` | Tuning JSON + CSV, best config (`tune.py`) |
 | `outputs/manifests/*.json` | Per-run provenance (command, args, git sha, input hashes, durations) |
 
 ## Cost prediction
@@ -524,12 +574,12 @@ forecasts from each test origin, scored on the same windows as the neural model:
 `append`, no refit) and **ETS** (Holt-Winters, additive weekly seasonality,
 refit per origin).
 
-On the default synthetic dataset the GRU beats the naive baselines
-(WAPE ≈ 10.7% vs ≈ 14.0% seasonal-naive and ≈ 17.0% persistence), but a plain
-**ETS** baseline is competitive-to-better on the single test split (≈ 9.8%),
-with SARIMAX at ≈ 11.4%. That the synthetic annual cycle is largely captured by
-classical smoothing is exactly why the rolling-origin numbers in
-`evaluation_cv.json` matter more than any single-split ranking.
+On the default (temperature-coupled) synthetic dataset the tuned GRU leads every
+baseline on the single test split: **WAPE ≈ 15.0%** vs seasonal-naive ≈ 20.8%,
+persistence ≈ 28.0%, SARIMAX ≈ 17.9% and ETS ≈ 15.0% (the two are within 0.04
+percentage points). That a classical smoother is essentially level with a small
+GRU is exactly why the rolling-origin numbers in `evaluation_cv.json` matter
+more than any single-split ranking.
 
 ```bash
 pip install '.[stats]'          # or: uv pip install statsmodels
@@ -553,13 +603,14 @@ bijli-predict-ai/
 │   └── lstm_model.py            # comparison model
 ├── tests/                       # pytest suite (cli, tariffs, preprocessing,
 │                                #   inference, weather, features, calibration,
-│                                #   cv, baselines, api)
+│                                #   cv, baselines, api, ablation, tune)
 ├── artifacts/                   # best_model.pt, scaler.joblib,
 │                                #   feature_scaler.joblib, calibration.json
 ├── outputs/                     # predictions.csv, forecast.png, evaluation.json,
 │                                #   evaluation_cv.json, cost_forecast.png,
 │                                #   cost_projection.png, projection_90d.csv,
-│                                #   cost_summary.json, bijli_report.xlsx/.html
+│                                #   cost_summary.json, bijli_report.xlsx/.html,
+│                                #   ablation/ (json+csv+png), tuning/ (json+csv)
 ├── cli.py                       # unified `bijli` entry point
 ├── config.toml                  # hyperparameters / defaults (tomllib)
 ├── tariff_presets.toml          # named discom tariffs
@@ -577,7 +628,9 @@ bijli-predict-ai/
 ├── api.py                       # FastAPI JSON service (uvicorn api:app)
 ├── app.py                       # Streamlit dashboard
 ├── report.py                    # Excel + HTML report builder
-├── train.py                     # training entrypoint
+├── train.py                     # training entrypoint (fit_model / save_checkpoint)
+├── ablation.py                  # architecture x feature-set ablation study
+├── tune.py                      # random hyperparameter search
 ├── evaluate.py                  # metrics + baselines + plot
 ├── predict.py                   # 7-day consumption + cost forecast
 ├── Dockerfile                   # slim CPU-only API image

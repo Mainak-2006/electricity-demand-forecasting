@@ -34,6 +34,30 @@ city = "delhi"         # city for --features weather temperature
 log_level = "INFO"          # DEBUG | INFO | WARNING | ERROR
 manifest_dir = "outputs/manifests"
 
+[ablation]
+models = ["gru", "lstm"]        # architectures to compare
+features = ["none", "calendar"] # feature sets to compare
+epochs = 50
+patience = 10
+seed = 42
+device = "auto"
+out_dir = "outputs/ablation"
+log_level = "INFO"
+
+[tune]
+model = "gru"
+trials = 12
+epochs = 40
+patience = 10
+lr_min = 0.0001
+lr_max = 0.01
+window = 30
+seed = 42
+device = "auto"
+features = "calendar"
+out_dir = "outputs/tuning"
+log_level = "INFO"
+
 [evaluate]
 device = "cpu"
 splits = [0.70, 0.15, 0.15]
