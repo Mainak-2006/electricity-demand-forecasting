@@ -23,6 +23,31 @@ notebook = [
     "jupyter==1.1.1",
 ]
 
+[project.scripts]
+bijli = "cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# Flat layout: the project is a set of top-level script modules plus the
+# `models` package. Listing them explicitly stops setuptools from trying to
+# package data/, outputs/ and notebooks/.
+[tool.setuptools]
+packages = ["models"]
+py-modules = [
+    "cli",
+    "evaluate",
+    "generate_data",
+    "iawe_ingest",
+    "inference",
+    "predict",
+    "preprocessing",
+    "report",
+    "tariffs",
+    "train",
+]
+
 # Resolve PyTorch from the CPU wheel index so `uv.lock` is reproducible on
 # any machine and in CI, independent of local CUDA drivers.
 [[tool.uv.index]]

@@ -102,8 +102,9 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main() -> None:
-    args = build_parser().parse_args()
+def main(args: argparse.Namespace | None = None) -> None:
+    if args is None:
+        args = build_parser().parse_args()
 
     df = generate_series(start=args.start, days=args.days, seed=args.seed)
 

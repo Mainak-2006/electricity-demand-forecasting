@@ -36,7 +36,14 @@ import torch
 from inference import load_model, resolve_device
 from preprocessing import clean_series, load_consumption, load_scaler
 from report import build_excel
-from tariffs import DEFAULT_RATE, Tariff, compute_bill, parse_slabs
+from tariffs import (
+    DEFAULT_PRESETS_PATH,
+    DEFAULT_RATE,
+    Tariff,
+    compute_bill,
+    get_preset,
+    parse_slabs,
+)
 
 DEFAULT_INPUT = "data/sample_input.csv"
 DEFAULT_ARTIFACTS = "artifacts"
@@ -63,8 +70,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="slab tariff 'LOW-HIGH:RATE,...' (overrides --rate), e.g. "
         "'0-100:3.5,100-200:4.5,200-100000:7'",
     )
-    p.add_argument("--fixed", type=float, default=0.0, help="fixed charge for the period (INR)")
-    p.add_argument("--tax-pct", type=float, default=0.0, help="tax/surcharge %% on energy charge")
+    p.add_argument(
+        "--preset",
+        default=None,
+        help="named discom tariff from tariff_presets.toml (e.g. bses, tata_power)",
+    )
+    p.add_argument(
+        "--presets-file",
+        default=DEFAULT_PRESETS_PATH,
+        help="path to the tariff presets TOML file",
+    )
+    p.add_argument(
+        "--fixed",
+        type=float,
+        default=None,
+        help="fixed charge for the period (INR); overrides a preset's value",
+    )
+    p.add_argument(
+        "--tax-pct",
+        type=float,
+        default=None,
+        help="tax/surcharge %% on energy charge; overrides a preset's value",
+    )
     p.add_argument(
         "--project-days",
         type=int,
@@ -90,14 +117,27 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def build_tariff(args: argparse.Namespace) -> Tariff:
-    if args.slab:
-        return Tariff(
-            slabs=parse_slabs(args.slab),
-            fixed=args.fixed,
-            tax_pct=args.tax_pct,
-            label="slab",
-        )
-    return Tariff(rate=args.rate, fixed=args.fixed, tax_pct=args.tax_pct, label="flat")
+    """Resolve a Tariff from --preset / --slab / --rate, then apply overrides.
+
+    Precedence: an explicit --slab beats a preset's slabs; --fixed / --tax-pct
+    override whatever the preset or flat default supplied when given.
+    """
+    if getattr(args, "preset", None):
+        tariff = get_preset(args.preset, getattr(args, "presets_file", DEFAULT_PRESETS_PATH))
+        if args.slab:
+            tariff.slabs = parse_slabs(args.slab)
+            tariff.rate = 0.0
+            tariff.label = f"slab ({args.preset})"
+    elif args.slab:
+        tariff = Tariff(slabs=parse_slabs(args.slab), label="slab")
+    else:
+        tariff = Tariff(rate=args.rate, label="flat")
+
+    if getattr(args, "fixed", None) is not None:
+        tariff.fixed = args.fixed
+    if getattr(args, "tax_pct", None) is not None:
+        tariff.tax_pct = args.tax_pct
+    return tariff
 
 
 def save_cost_plot(dates, forecast, daily_costs, total_cost, path: Path) -> None:
@@ -205,8 +245,9 @@ def _period_summary(bill: dict) -> dict:
     }
 
 
-def main() -> None:
-    args = build_parser().parse_args()
+def main(args: argparse.Namespace | None = None) -> None:
+    if args is None:
+        args = build_parser().parse_args()
     device = resolve_device(args.device)
     tariff = build_tariff(args)
 

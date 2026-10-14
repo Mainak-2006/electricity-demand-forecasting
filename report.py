@@ -145,8 +145,9 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main() -> None:
-    args = build_parser().parse_args()
+def main(args: argparse.Namespace | None = None) -> None:
+    if args is None:
+        args = build_parser().parse_args()
     path = build_excel(args.outputs_dir, args.out)
     print(f"Excel report saved: {path}")
 

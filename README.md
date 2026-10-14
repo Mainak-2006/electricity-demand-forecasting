@@ -87,6 +87,31 @@ python evaluate.py
 
 ---
 
+## Unified CLI
+
+The scripts are also wrapped behind one entry point, installed as `bijli`
+(`[project.scripts] bijli = "cli:main"`):
+
+```bash
+bijli data          # generate the synthetic dataset
+bijli train         # train the forecaster (deterministic by default)
+bijli evaluate      # metrics on the held-out test split
+bijli predict       # 7-day forecast + bill + 90-day projection
+bijli report        # rebuild the Excel report from outputs/
+```
+
+Defaults (epochs, batch size, splits, output paths, …) live in
+[`config.toml`](config.toml); any CLI flag overrides them:
+
+```bash
+bijli train --epochs 20            # override config.toml
+bijli --config other.toml train    # use a different config file
+```
+
+The original scripts keep working directly (`python train.py …`).
+
+---
+
 ## Using real data
 
 The pipeline is dataset-agnostic: any CSV with a date column and a consumption
@@ -142,12 +167,20 @@ meter(s) over time into daily kWh.
 - **Slab tariff** (typical Indian discom): `--slab "LOW-HIGH:RATE,..."`. Units are
   charged progressively, e.g. the first 100 kWh at the first rate, the next 100
   at the second, etc.
+- **Named discom preset**: `--preset bses`. Bundled presets live in
+  [`tariff_presets.toml`](tariff_presets.toml) (`bses`, `bses_yamuna`,
+  `tata_power`, `adani_mumbai`, `msedcl`, `bescom`) and are *illustrative*, not
+  billing-grade.
 - **Fixed charge** for the period: `--fixed` (₹).
-- **Tax / surcharge** on the energy charge: `--tax-pct` (%).
+- **Tax / surcharge** on the energy charge: `--tax-pct` (%); `--fixed`/`--tax-pct`
+  override the preset's values when given.
 
 ```bash
 # Flat
 python predict.py --rate 7
+
+# Named discom preset (equivalent through the CLI: `bijli predict --preset bses`)
+bijli predict --preset bses
 
 # Slabs + ₹50 fixed + 5% tax
 python predict.py --slab "0-100:3.5,100-200:4.5,200-400:6.5,400-100000:7" \
@@ -249,6 +282,7 @@ On the default synthetic dataset the GRU meaningfully beats both baselines
 
 ```text
 bijli-predict-ai/
+├── .github/workflows/ci.yml     # ruff + pytest on Python 3.12 / 3.14
 ├── data/
 │   ├── raw/                     # source CSVs (synthetic or iAWE)
 │   ├── processed/               # daily_consumption.csv
@@ -257,23 +291,28 @@ bijli-predict-ai/
 ├── models/
 │   ├── gru_model.py             # primary model
 │   └── lstm_model.py            # comparison model
-├── tests/                       # pytest suite (tariffs, preprocessing, inference)
+├── tests/                       # pytest suite (cli, tariffs, preprocessing, inference)
 ├── artifacts/                   # best_model.pt, scaler.joblib
 ├── outputs/                     # predictions.csv, forecast.png, evaluation.json,
 │                                #   cost_forecast.png, cost_projection.png,
 │                                #   projection_90d.csv, cost_summary.json,
 │                                #   bijli_report.xlsx
+├── cli.py                       # unified `bijli` entry point
+├── config.toml                  # hyperparameters / defaults (tomllib)
+├── tariff_presets.toml          # named discom tariffs
 ├── preprocessing.py             # load / clean / split / window / scale
 ├── generate_data.py             # synthetic Indian household generator
 ├── iawe_ingest.py               # real iAWE -> daily kWh
-├── tariffs.py                   # flat / slab / fixed / tax bill calculation
+├── tariffs.py                   # flat / slab / preset / fixed / tax bill calculation
 ├── inference.py                 # shared device selection + model loading
 ├── report.py                    # multi-sheet Excel report builder
 ├── train.py                     # training entrypoint
 ├── evaluate.py                  # metrics + baselines + plot
 ├── predict.py                   # 7-day consumption + cost forecast
-├── pyproject.toml               # ruff + pytest config, dev extras
-└── requirements.txt
+├── Makefile                     # task runner
+├── pyproject.toml               # deps, scripts, ruff + pytest config
+├── requirements.txt
+└── uv.lock                      # locked dependency resolution
 ```
 
 ---

@@ -56,8 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main() -> None:
-    args = build_parser().parse_args()
+def main(args: argparse.Namespace | None = None) -> None:
+    if args is None:
+        args = build_parser().parse_args()
     device = resolve_device(args.device)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

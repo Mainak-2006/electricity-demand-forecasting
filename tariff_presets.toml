@@ -1,0 +1,45 @@
+# Named electricity-tariff presets for major Indian discoms.
+#
+# These are *approximate, illustrative* domestic telescopic schedules rounded
+# for forecasting — NOT billing-grade. Always confirm against the discom's
+# current published tariff order before relying on them.
+#
+# `slabs` uses the same "LOW-HIGH:RATE,..." grammar as `predict.py --slab`
+# (see tariffs.parse_slabs). `fixed` is a per-period fixed charge (INR) and
+# `tax_pct` an energy-charge surcharge (electricity duty + tax).
+
+[bses]
+label = "BSES Rajdhani (Delhi)"
+slabs = "0-200:3.0,200-400:4.5,400-800:6.5,800-1000000:8.0"
+fixed = 0.0
+tax_pct = 5.0
+
+[bses_yamuna]
+label = "BSES Yamuna (Delhi)"
+slabs = "0-200:3.0,200-400:4.5,400-800:6.5,800-1000000:8.0"
+fixed = 0.0
+tax_pct = 5.0
+
+[tata_power]
+label = "Tata Power Delhi Distribution"
+slabs = "0-200:3.0,200-400:4.5,400-800:6.5,800-1000000:8.0"
+fixed = 0.0
+tax_pct = 5.0
+
+[adani_mumbai]
+label = "Adani Electricity Mumbai"
+slabs = "0-100:3.65,100-300:5.5,300-500:8.0,500-1000000:9.5"
+fixed = 0.0
+tax_pct = 16.0
+
+[msedcl]
+label = "MSEDCL (Maharashtra)"
+slabs = "0-100:3.24,100-300:6.5,300-500:9.5,500-1000000:10.5"
+fixed = 0.0
+tax_pct = 16.0
+
+[bescom]
+label = "BESCOM (Bengaluru)"
+slabs = "0-50:3.4,50-100:4.1,100-200:5.4,200-1000000:7.0"
+fixed = 0.0
+tax_pct = 9.0

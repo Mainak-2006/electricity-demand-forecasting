@@ -1,0 +1,44 @@
+# BijliPredict AI configuration.
+#
+# Loaded by cli.py (the `bijli` command). Every value here is a *default*:
+# an explicit CLI flag overrides it. Keys mirror the argparse option names
+# (dashes become underscores), e.g. `--batch-size` -> `batch_size`.
+#
+# Parsed with the standard-library `tomllib` (Python 3.11+).
+
+[data]
+# Synthetic dataset (generate_data.py): 3 years of daily kWh.
+start = "2023-01-01"
+days = 1095
+seed = 42
+raw_out = "data/raw/synthetic_household.csv"
+processed_out = "data/processed/daily_consumption.csv"
+sample_input = "data/sample_input.csv"
+
+[train]
+model = "gru"          # gru | lstm
+epochs = 100
+batch_size = 32
+lr = 0.001
+window = 30            # input length (days)
+horizon = 7            # forecast length (days)
+patience = 15
+seed = 42
+deterministic = true
+device = "auto"
+splits = [0.70, 0.15, 0.15]
+
+[evaluate]
+device = "cpu"
+splits = [0.70, 0.15, 0.15]
+
+[predict]
+device = "cpu"
+rate = 7.0
+project_days = 90
+out = "outputs/predictions.csv"
+plot_out = "outputs/cost_forecast.png"
+summary_out = "outputs/cost_summary.json"
+projection_plot_out = "outputs/cost_projection.png"
+projection_csv_out = "outputs/projection_90d.csv"
+excel_out = "outputs/bijli_report.xlsx"

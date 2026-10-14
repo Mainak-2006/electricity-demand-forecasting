@@ -16,9 +16,13 @@ Bill = energy_charge + tax + fixed
 
 from __future__ import annotations
 
+import dataclasses
+import tomllib
 from dataclasses import dataclass, field
+from pathlib import Path
 
 DEFAULT_RATE = 7.0
+DEFAULT_PRESETS_PATH = "tariff_presets.toml"
 
 
 @dataclass
@@ -96,6 +100,41 @@ def parse_slabs(spec: str) -> list[tuple[float, float]]:
                 f"Slabs must be contiguous: gap/overlap between {prev_upper:g} and {lower:g}."
             )
     return [(upper, rate) for _, upper, rate in parsed]
+
+
+def _tariff_from_dict(name: str, raw: dict) -> Tariff:
+    """Build a Tariff from a preset table (see tariff_presets.toml)."""
+    slabs = None
+    if "slabs" in raw:
+        spec = raw["slabs"]
+        slabs = parse_slabs(spec if isinstance(spec, str) else ",".join(spec))
+    return Tariff(
+        rate=float(raw.get("rate", DEFAULT_RATE)),
+        slabs=slabs,
+        fixed=float(raw.get("fixed", 0.0)),
+        tax_pct=float(raw.get("tax_pct", 0.0)),
+        label=str(raw.get("label", name)),
+    )
+
+
+def load_presets(path: str | Path = DEFAULT_PRESETS_PATH) -> dict[str, Tariff]:
+    """Load every named tariff preset from a TOML file (keyed by name)."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Tariff presets file not found: {path}. Expected names like 'bses'."
+        )
+    data = tomllib.loads(path.read_text())
+    return {name: _tariff_from_dict(name, raw) for name, raw in data.items()}
+
+
+def get_preset(name: str, path: str | Path = DEFAULT_PRESETS_PATH) -> Tariff:
+    """Return an independent copy of the named preset."""
+    presets = load_presets(path)
+    if name not in presets:
+        available = ", ".join(sorted(presets))
+        raise KeyError(f"Unknown tariff preset '{name}'. Available: {available}.")
+    return dataclasses.replace(presets[name])
 
 
 def compute_bill(forecast_kwh: list[float], tariff: Tariff) -> dict:

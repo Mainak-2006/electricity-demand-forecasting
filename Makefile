@@ -10,6 +10,9 @@
 #   make lint      # ruff check
 #   make format    # ruff format
 #   make all       # data -> train -> eval -> predict -> report
+#
+# The individual scripts still work directly; `make install` also installs the
+# unified console script, e.g. `bijli predict --preset bses` or `bijli train`.
 
 SHELL := /bin/bash
 
