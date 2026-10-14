@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
-import streamlit as st
+import streamlit as st 
 
 import service
 from report import render_html
@@ -111,7 +111,7 @@ st.title("⚡ BijliPredict AI")
 st.caption("Household electricity forecasting, billing and cost projection.")
 
 try:
-    svc = get_service(model_path, calib_path, calib_path)
+    svc = get_service(model_path, None, calib_path)
 except Exception as exc:  # noqa: BLE001 - surface any load failure to the user
     st.error(f"Could not load the model: {exc}")
     st.stop()
