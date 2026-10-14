@@ -1,7 +1,7 @@
-"""BijliPredict AI - assemble an Excel report from pipeline outputs.
+"""BijliPredict AI - assemble Excel and HTML reports from pipeline outputs.
 
-Builds a single multi-sheet workbook from the files produced by
-`predict.py` and `evaluate.py`:
+Builds a single multi-sheet workbook (and a standalone HTML page) from the files
+produced by `predict.py` and `evaluate.py`:
 
     Summary             bill + projection headline numbers
     Forecast            the 7-day forecast (kWh + cost)
@@ -12,6 +12,7 @@ Builds a single multi-sheet workbook from the files produced by
 Usage:
     python report.py                          # from default outputs/
     python report.py --outputs-dir outputs --out outputs/bijli_report.xlsx
+    python report.py --html-out outputs/bijli_report.html
 """
 
 from __future__ import annotations
@@ -27,9 +28,24 @@ from openpyxl.utils import get_column_letter
 
 DEFAULT_OUTPUTS = "outputs"
 DEFAULT_XLSX = "outputs/bijli_report.xlsx"
+DEFAULT_HTML = "outputs/bijli_report.html"
 
 HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
 HEADER_FONT = Font(bold=True, color="FFFFFF")
+
+_HTML_STYLE = """
+:root { color-scheme: light dark; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+       margin: 0 auto; max-width: 960px; padding: 2rem 1.25rem; line-height: 1.45; }
+h1 { border-bottom: 3px solid #1f4e78; padding-bottom: .4rem; }
+h2 { margin-top: 2rem; color: #1f4e78; }
+.meta { color: #666; font-size: .9rem; }
+table.table { border-collapse: collapse; width: 100%; margin-top: .5rem; font-size: .92rem; }
+table.table th { background: #1f4e78; color: #fff; text-align: left; padding: .5rem .6rem; }
+table.table td { border-bottom: 1px solid #ddd; padding: .45rem .6rem; }
+table.table tr:nth-child(even) td { background: rgba(31, 78, 120, 0.05); }
+section { margin-bottom: 1.5rem; }
+"""
 
 
 def _read_json(path: Path) -> dict:
@@ -127,27 +143,30 @@ def _autofit(writer: pd.ExcelWriter) -> None:
         ws.freeze_panes = "A2"
 
 
-def build_excel(
-    outputs_dir: str | Path = DEFAULT_OUTPUTS,
-    out_path: str | Path = DEFAULT_XLSX,
-) -> Path:
-    """Read pipeline outputs and write a multi-sheet Excel workbook."""
+def _load_sheets(outputs_dir: str | Path) -> dict[str, pd.DataFrame]:
+    """Assemble the report sheets shared by the Excel and HTML builders."""
     outputs_dir = Path(outputs_dir)
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
     cost = _read_json(outputs_dir / "cost_summary.json")
     evaluation = _read_json(outputs_dir / "evaluation.json")
     forecast = _read_csv(outputs_dir / "predictions.csv")
     projection = _read_csv(outputs_dir / "projection_90d.csv")
-
-    sheets: dict[str, pd.DataFrame] = {
+    return {
         "Summary": _summary_frame(cost, evaluation),
         "Forecast": forecast,
         "Projection": projection,
         "Evaluation": _evaluation_frame(evaluation),
         "Tariff": _tariff_frame(cost),
     }
+
+
+def build_excel(
+    outputs_dir: str | Path = DEFAULT_OUTPUTS,
+    out_path: str | Path = DEFAULT_XLSX,
+) -> Path:
+    """Read pipeline outputs and write a multi-sheet Excel workbook."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    sheets = _load_sheets(outputs_dir)
 
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
         for name, frame in sheets.items():
@@ -158,10 +177,54 @@ def build_excel(
     return out_path
 
 
+def _html_table(frame: pd.DataFrame, empty_msg: str = "no data") -> str:
+    if frame is None or frame.empty:
+        frame = pd.DataFrame({"info": [empty_msg]})
+    return frame.to_html(index=False, border=0, classes="table", justify="left")
+
+
+def render_html(sheets: dict[str, pd.DataFrame], source: str = "") -> str:
+    """Render a dict of named tables into a standalone HTML document."""
+    generated = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    meta = f"Generated {generated}" + (f" &middot; source: <code>{source}</code>" if source else "")
+    sections = "\n".join(
+        f"<section><h2>{name}</h2>\n{_html_table(frame)}</section>"
+        for name, frame in sheets.items()
+    )
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BijliPredict AI report</title>
+<style>{_HTML_STYLE}</style>
+</head>
+<body>
+<h1>BijliPredict AI report</h1>
+<p class="meta">{meta}</p>
+{sections}
+</body>
+</html>
+"""
+
+
+def build_html(
+    outputs_dir: str | Path = DEFAULT_OUTPUTS,
+    out_path: str | Path = DEFAULT_HTML,
+) -> Path:
+    """Read pipeline outputs and write a standalone HTML report (no deps)."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    html = render_html(_load_sheets(outputs_dir), source=str(Path(outputs_dir)))
+    out_path.write_text(html)
+    return out_path
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Build the Excel report from outputs.")
+    p = argparse.ArgumentParser(description="Build the report from outputs.")
     p.add_argument("--outputs-dir", default=DEFAULT_OUTPUTS)
-    p.add_argument("--out", default=DEFAULT_XLSX)
+    p.add_argument("--out", default=DEFAULT_XLSX, help="Excel report path")
+    p.add_argument("--html-out", default=DEFAULT_HTML, help="HTML report path (empty to skip)")
     return p
 
 
@@ -170,6 +233,9 @@ def main(args: argparse.Namespace | None = None) -> None:
         args = build_parser().parse_args()
     path = build_excel(args.outputs_dir, args.out)
     print(f"Excel report saved: {path}")
+    if args.html_out:
+        html_path = build_html(args.outputs_dir, args.html_out)
+        print(f"HTML report saved: {html_path}")
 
 
 if __name__ == "__main__":

@@ -5,7 +5,9 @@
 #   make train     # train the forecaster (deterministic by default)
 #   make eval      # evaluate on the held-out test split
 #   make predict   # 7-day forecast + 90-day projection + bill estimate
-#   make report    # build the Excel report from outputs/
+#   make report    # build the Excel + HTML reports from outputs/
+#   make serve     # run the FastAPI JSON service (uvicorn)
+#   make app       # run the Streamlit dashboard
 #   make test      # run the pytest suite
 #   make lint      # ruff check
 #   make format    # ruff format
@@ -24,13 +26,13 @@ RUFF := $(VENV)/bin/ruff
 ARGS ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help install data train eval predict report test lint format all clean
+.PHONY: help install data train eval predict report serve app test lint format all clean
 
 help:
-	@echo "Targets: install data train eval predict report test lint format all clean"
+	@echo "Targets: install data train eval predict report serve app test lint format all clean"
 
 install:
-	uv sync --extra dev
+	uv sync --extra dev --extra serve
 
 data:
 	$(PY) generate_data.py $(ARGS)
@@ -46,6 +48,12 @@ predict:
 
 report:
 	$(PY) report.py $(ARGS)
+
+serve:
+	$(PY) -m uvicorn api:app --host 0.0.0.0 --port 8000 $(ARGS)
+
+app:
+	$(PY) -m streamlit run app.py $(ARGS)
 
 test:
 	$(PY) -m pytest

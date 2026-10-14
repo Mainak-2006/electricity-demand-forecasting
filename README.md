@@ -6,8 +6,10 @@ A GRU neural network (with an LSTM comparison model) is trained on historical
 daily household electricity consumption and forecasts the **next 7 days** of
 usage, along with an estimated energy bill in Indian Rupees (₹).
 
-No frontend, backend, database, API or deployment. Everything runs locally in
-Python.
+Everything runs locally, but the trained model is also exposed three ways:
+a unified `bijli` CLI, a **FastAPI** JSON service (`uvicorn api:app`), and a
+**Streamlit** dashboard (`streamlit run app.py`). A `Dockerfile` packages the
+API into a slim CPU-only image.
 
 ---
 
@@ -32,7 +34,7 @@ Evaluation (MAE / RMSE / WAPE vs seasonal-naive baseline)
 outputs/predictions.csv + outputs/forecast.png + outputs/evaluation.json
         |
         v
-Cost forecast + monthly / 3-month projection + outputs/bijli_report.xlsx
+Cost forecast + monthly / 3-month projection + outputs/bijli_report.xlsx (+ .html)
 ```
 
 ---
@@ -74,7 +76,7 @@ python train.py --model gru --epochs 100
 # 3. Evaluate on the held-out chronological test period.
 python evaluate.py
 
-# 4. Forecast the next 7 days, estimate the bill, and build the Excel report.
+# 4. Forecast the next 7 days, estimate the bill, and build the Excel + HTML reports.
 python predict.py --input data/sample_input.csv --rate 7
 ```
 
@@ -96,8 +98,16 @@ The scripts are also wrapped behind one entry point, installed as `bijli`
 bijli data          # generate the synthetic dataset
 bijli train         # train the forecaster (deterministic by default)
 bijli evaluate      # metrics on the held-out test split
-bijli predict       # 7-day forecast + bill + 90-day projection
-bijli report        # rebuild the Excel report from outputs/
+bijli predict       # 7-day forecast + bill + 90-day projection + reports
+bijli report        # rebuild the Excel + HTML reports from outputs/
+bijli serve         # run the FastAPI forecast service (uvicorn)
+```
+
+Optional extras: `serve` (FastAPI + uvicorn, for the API), `ui` (Streamlit
+dashboard), `weather` (HTTPS fetch via httpx), `stats` (SARIMAX / ETS baselines).
+
+```bash
+uv sync --extra dev --extra serve   # dev tools + API test deps
 ```
 
 Defaults (epochs, batch size, splits, output paths, …) live in
@@ -244,6 +254,68 @@ middle of it.
 
 ---
 
+## Serving & UI
+
+The inference core lives in a FastAPI-free module (`service.py`) so the CLI, the
+HTTP API (`api.py`) and the Streamlit app (`app.py`) share one code path.
+
+### JSON API
+
+```bash
+uv sync --extra serve          # fastapi, uvicorn, pydantic, jinja2
+uvicorn api:app --port 8000    # or: bijli serve --port 8000
+```
+
+| Method & path | Purpose |
+| --- | --- |
+| `GET /` | HTML index listing the endpoints |
+| `GET /health` | model/feature/calibration status (loads on startup) |
+| `POST /forecast` | 7-day (or `horizon`-day) forecast + conformal intervals |
+| `POST /bill` | forecast → bill under flat / slab / preset tariff |
+| `POST /projection` | autoregressive 90-day rollout + monthly / 3-month bill |
+
+```bash
+curl -s localhost:8000/health
+
+curl -s localhost:8000/forecast -H 'content-type: application/json' \
+  -d '{"history_kwh": [3.1, 2.9, 3.4, /* … 30 values … */]}'
+```
+
+`POST /forecast` takes `history_kwh` (≥ the model's input length, e.g. 30),
+optional `horizon`, `last_date`, and per-request `rate / slab / preset / fixed /
+tax_pct`. The model, scaler and calibration paths come from
+`BIJLI_MODEL_PATH` / `BIJLI_SCALER_PATH` / `BIJLI_CALIBRATION_PATH` (defaults:
+`artifacts/…`) and `BIJLI_DEVICE`. Invalid input (too-short history, NaN,
+unknown preset, bad slab grammar) returns a structured **422**. The response
+mirrors `outputs/` — same numbers as `predict.py`.
+
+### Streamlit dashboard
+
+```bash
+uv sync --extra ui             # streamlit
+streamlit run app.py           # then open the printed localhost URL
+```
+
+Upload a CSV (or use the bundled `data/sample_input.csv`), pick a tariff, and
+read the forecast, bill and projection in tabs — with CSV / Excel / HTML
+downloads built from the in-memory results.
+
+### Docker
+
+```bash
+bijli train                    # produce artifacts/ (best_model.pt, scaler, calibration)
+docker build -t bijli-predict-ai .
+docker run -p 8000:8000 bijli-predict-ai     # or bind-mount fresh artifacts:
+#   docker run -v "$PWD/artifacts:/app/artifacts:ro" -p 8000:8000 bijli-predict-ai
+```
+
+The image is CPU-only (torch from the PyTorch CPU wheel index), installs just
+the `serve` extra from the lockfile, and ships a `HEALTHCHECK` against
+`/health`. `artifacts/` is git-ignored, so a fresh clone must train first (or
+mount artifacts) before the container will report healthy.
+
+---
+
 ## Using real data
 
 The pipeline is dataset-agnostic: any CSV with a date column and a consumption
@@ -288,6 +360,7 @@ meter(s) over time into daily kWh.
 | `outputs/projection_90d.csv` | Per-day projected kWh / interval bounds / daily / cumulative cost |
 | `outputs/cost_summary.json` | Bill breakdown + monthly & 3-month projection + interval ranges |
 | `outputs/bijli_report.xlsx` | Multi-sheet Excel report (auto-built by `predict.py`) |
+| `outputs/bijli_report.html` | Self-contained HTML report (auto-built by `predict.py` / `report.py`) |
 | `outputs/evaluation.json` | MAE / RMSE / WAPE, baseline comparison, coverage |
 | `outputs/evaluation_cv.json` | Per-fold + mean/std metrics (`evaluate.py --cv rolling`) |
 
@@ -346,14 +419,17 @@ Long-term cost projection (rolling forecast)
 > Long-horizon projections compound model error, so they are directional
 > estimates, not guarantees.
 
-### Excel report
+### Excel & HTML reports
 
 `predict.py` also assembles a single multi-sheet workbook at
 `outputs/bijli_report.xlsx` (sheets: `Summary`, `Forecast`, `Projection`,
-`Evaluation`, `Tariff`). Rebuild it from existing outputs at any time:
+`Evaluation`, `Tariff`) **and** a self-contained `outputs/bijli_report.html`
+with the same tables (no external assets). Rebuild either from existing outputs
+at any time:
 
 ```bash
-python report.py --outputs-dir outputs --out outputs/bijli_report.xlsx
+python report.py --outputs-dir outputs \
+    --out outputs/bijli_report.xlsx --html-out outputs/bijli_report.html
 ```
 
 The notebook (`notebooks/exploration.ipynb`) builds the same workbook and
@@ -441,13 +517,13 @@ bijli-predict-ai/
 │   └── lstm_model.py            # comparison model
 ├── tests/                       # pytest suite (cli, tariffs, preprocessing,
 │                                #   inference, weather, features, calibration,
-│                                #   cv, baselines)
+│                                #   cv, baselines, api)
 ├── artifacts/                   # best_model.pt, scaler.joblib,
 │                                #   feature_scaler.joblib, calibration.json
 ├── outputs/                     # predictions.csv, forecast.png, evaluation.json,
 │                                #   evaluation_cv.json, cost_forecast.png,
 │                                #   cost_projection.png, projection_90d.csv,
-│                                #   cost_summary.json, bijli_report.xlsx
+│                                #   cost_summary.json, bijli_report.xlsx/.html
 ├── cli.py                       # unified `bijli` entry point
 ├── config.toml                  # hyperparameters / defaults (tomllib)
 ├── tariff_presets.toml          # named discom tariffs
@@ -461,10 +537,14 @@ bijli-predict-ai/
 ├── iawe_ingest.py               # real iAWE -> daily kWh
 ├── tariffs.py                   # flat / slab / preset / fixed / tax bill calculation
 ├── inference.py                 # shared device selection + model loading
-├── report.py                    # multi-sheet Excel report builder
+├── service.py                   # FastAPI-free inference/tariff core
+├── api.py                       # FastAPI JSON service (uvicorn api:app)
+├── app.py                       # Streamlit dashboard
+├── report.py                    # Excel + HTML report builder
 ├── train.py                     # training entrypoint
 ├── evaluate.py                  # metrics + baselines + plot
 ├── predict.py                   # 7-day consumption + cost forecast
+├── Dockerfile                   # slim CPU-only API image
 ├── Makefile                     # task runner
 ├── pyproject.toml               # deps, scripts, ruff + pytest config
 ├── requirements.txt
@@ -476,7 +556,7 @@ bijli-predict-ai/
 ## Testing & quality
 
 ```bash
-uv sync --extra dev   # or: pip install pytest ruff
+uv sync --extra dev --extra serve   # or: pip install pytest ruff fastapi httpx
 make test             # run the unit tests (pytest)
 make lint             # lint (ruff check .)
 ```
@@ -497,5 +577,5 @@ so repeated runs produce identical artifacts.
 - Predictions are clipped to be **non-negative** (consumption cannot be
   negative).
 - All random seeds are fixed (`--seed`, default 42) for reproducibility.
-- This is a reproducible forecasting experiment, not a production prediction
-  service.
+- This is a reproducible forecasting experiment with a thin local serving layer —
+  not a hardened, authenticated production service.

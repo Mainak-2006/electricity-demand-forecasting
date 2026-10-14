@@ -37,7 +37,7 @@ import calibration
 from features import build_feature_matrix, temperature_for_dates
 from inference import feature_info, load_model, make_model_input, resolve_device
 from preprocessing import clean_series, load_consumption, load_scaler
-from report import build_excel
+from report import build_excel, build_html
 from tariffs import (
     DEFAULT_PRESETS_PATH,
     DEFAULT_RATE,
@@ -56,6 +56,7 @@ DEFAULT_PROJECTION_DAYS = 90
 DEFAULT_PROJECTION_PLOT = "outputs/cost_projection.png"
 DEFAULT_PROJECTION_CSV = "outputs/projection_90d.csv"
 DEFAULT_EXCEL = "outputs/bijli_report.xlsx"
+DEFAULT_HTML = "outputs/bijli_report.html"
 DEFAULT_CALIBRATION = "artifacts/calibration.json"
 MONTH_DAYS = 30
 QUARTER_DAYS = 90
@@ -115,6 +116,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--excel-out",
         default=DEFAULT_EXCEL,
         help="multi-sheet Excel report path (empty to skip)",
+    )
+    p.add_argument(
+        "--html-out",
+        default=DEFAULT_HTML,
+        help="standalone HTML report path (empty to skip)",
     )
     p.add_argument("--device", default="cpu", choices=["auto", "cpu", "cuda"])
     p.add_argument(
@@ -530,6 +536,11 @@ def main(args: argparse.Namespace | None = None) -> None:
         excel_path = build_excel(out.parent, args.excel_out)
         print("Excel report saved:")
         print(str(excel_path))
+
+    if args.html_out:
+        html_path = build_html(out.parent, args.html_out)
+        print("HTML report saved:")
+        print(str(html_path))
 
 
 if __name__ == "__main__":

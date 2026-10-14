@@ -6,7 +6,8 @@ Wraps the individual scripts behind a single entry point (installed as `bijli`):
     bijli train [options]      # train the GRU / LSTM forecaster
     bijli evaluate [options]   # evaluate on the held-out test split
     bijli predict [options]    # 7-day forecast + 90-day projection + bill
-    bijli report [options]     # build the Excel report from outputs/
+    bijli report [options]     # build the Excel + HTML reports from outputs/
+    bijli serve [options]      # run the FastAPI forecast service (uvicorn)
 
 Defaults come from config.toml; any explicit flag overrides them. The original
 scripts keep working unchanged (`python train.py ...`).
@@ -34,7 +35,8 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "train": ("train", "train the GRU / LSTM forecaster"),
     "evaluate": ("evaluate", "evaluate the model on the held-out test split"),
     "predict": ("predict", "forecast consumption, cost and the bill"),
-    "report": ("report", "build the Excel report from outputs/"),
+    "report": ("report", "build the Excel + HTML reports from outputs/"),
+    "serve": ("api", "run the FastAPI forecast service (uvicorn)"),
 }
 
 

@@ -9,3 +9,10 @@ joblib==1.6.0
 openpyxl==3.1.5
 holidays==0.106
 jupyter==1.1.1
+
+# Optional: JSON API + dashboard. For the Streamlit app also `pip install streamlit`.
+fastapi==0.143.1
+uvicorn==0.54.0
+pydantic==2.14.1
+jinja2==3.1.6
+httpx==0.28.1

@@ -89,11 +89,22 @@ def resolve_city(city: str) -> tuple[str, float, float]:
 
 
 def _http_get_json(url: str, params: dict, timeout: float = 30.0) -> dict:
-    """GET ``url?params`` and parse the JSON body (stdlib only)."""
-    query = urllib.parse.urlencode(params)
-    req = urllib.request.Request(f"{url}?{query}", headers={"User-Agent": "bijli-predict-ai"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    """GET ``url?params`` and parse the JSON body.
+
+    Prefers httpx when installed (the ``weather`` extra); falls back to the
+    stdlib so the module keeps working with zero extra dependencies.
+    """
+    headers = {"User-Agent": "bijli-predict-ai"}
+    try:
+        import httpx
+    except ImportError:
+        query = urllib.parse.urlencode(params)
+        req = urllib.request.Request(f"{url}?{query}", headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    resp = httpx.get(url, params=params, headers=headers, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
 
 
 def _parse_daily(payload: dict) -> pd.DataFrame:

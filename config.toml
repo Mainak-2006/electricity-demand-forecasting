@@ -49,4 +49,5 @@ summary_out = "outputs/cost_summary.json"
 projection_plot_out = "outputs/cost_projection.png"
 projection_csv_out = "outputs/projection_90d.csv"
 excel_out = "outputs/bijli_report.xlsx"
+html_out = "outputs/bijli_report.html"  # empty string skips the HTML report
 calibration_path = "artifacts/calibration.json"  # empty string skips intervals
