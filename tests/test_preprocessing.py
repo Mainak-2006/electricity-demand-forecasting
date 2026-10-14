@@ -9,9 +9,11 @@ import pytest
 from preprocessing import (
     chronological_split,
     clean_series,
+    is_long_frame,
     load_and_prepare,
     load_consumption,
     make_windows,
+    prepare_full_series,
 )
 
 
@@ -23,6 +25,23 @@ def _write_series(path, n=400, start="2023-01-01", seed=0):
         path, index=False
     )
     return dates, vals
+
+
+def _write_long(path, households=("h01", "h02"), n=400, start="2023-01-01"):
+    frames = []
+    for i, hh in enumerate(households):
+        rng = np.random.default_rng(i)
+        dates = pd.date_range(start, periods=n, freq="D")
+        frames.append(
+            pd.DataFrame(
+                {
+                    "date": dates.strftime("%Y-%m-%d"),
+                    "household": hh,
+                    "consumption_kwh": np.round(2.0 + i + rng.normal(0, 0.2, n), 3),
+                }
+            )
+        )
+    pd.concat(frames, ignore_index=True).to_csv(path, index=False)
 
 
 def test_make_windows_shapes():
@@ -104,3 +123,68 @@ def test_load_consumption_attaches_report(tmp_path):
     report = out.attrs["validation"]
     assert report["ok"] is True
     assert report["n_negative"] == 1
+
+
+# --- multi-household (long format) ----------------------------------------
+
+
+def test_load_consumption_detects_households(tmp_path):
+    path = tmp_path / "long.csv"
+    _write_long(path, n=20)
+    out = load_consumption(path, validate=True)
+    assert is_long_frame(out)
+    assert set(out["household"]) == {"h01", "h02"}
+
+
+def test_single_household_marks_not_multi(tmp_path):
+    path = tmp_path / "series.csv"
+    _write_series(path, n=200, seed=1)
+    prepared = load_and_prepare(path, input_len=30, horizon=7)
+    assert prepared["multi_household"] is False
+    assert "households" not in prepared
+
+
+def test_long_format_pools_windows_across_households(tmp_path):
+    path = tmp_path / "long.csv"
+    _write_long(path, households=("h01", "h02", "h03"), n=400)
+    prepared = load_and_prepare(path, input_len=30, horizon=7)
+    assert prepared["multi_household"] is True
+    assert prepared["households"] == ["h01", "h02", "h03"]
+    n_train = int(np.floor(400 * 0.70))
+    per_home_windows = n_train - 30 - 7 + 1
+    assert len(prepared["datasets"]["train"]["X"]) == per_home_windows * 3
+    assert prepared["datasets"]["train"]["X"].shape[2] == 1
+
+
+def test_long_format_scaler_fit_on_pooled_train(tmp_path):
+    path = tmp_path / "long.csv"
+    _write_long(path, households=("h01", "h02"), n=400)
+    prepared = load_and_prepare(path, input_len=30, horizon=7)
+    n_train = int(np.floor(400 * 0.70))
+    rng = np.random.default_rng(0)
+    rng2 = np.random.default_rng(1)
+    pooled = np.concatenate(
+        [
+            2.0 + rng.normal(0, 0.2, 400)[:n_train],
+            3.0 + rng2.normal(0, 0.2, 400)[:n_train],
+        ]
+    )
+    assert prepared["scaler"].mean_[0] == pytest.approx(pooled.mean())
+
+
+def test_long_format_household_frames_are_grouped(tmp_path):
+    path = tmp_path / "long.csv"
+    _write_long(path, households=("h01", "h02"), n=400)
+    prepared = load_and_prepare(path, input_len=30, horizon=7)
+    assert "household" in prepared["frames"]["test"].columns
+    assert set(prepared["frames_by_household"]) == {"train", "val", "test"}
+    assert len(prepared["frames_by_household"]["train"]) == 2
+
+
+def test_prepare_full_series_rejects_long_format(tmp_path):
+    path = tmp_path / "long.csv"
+    _write_long(path, n=200)
+    prepared = load_and_prepare(path, input_len=30, horizon=7)
+    with pytest.raises(ValueError, match="single-household"):
+        prepare_full_series(path, input_len=30, horizon=7, scaler=prepared["scaler"])
+

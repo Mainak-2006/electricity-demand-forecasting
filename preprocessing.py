@@ -9,11 +9,18 @@ Everything here is deliberately leakage-safe:
 
 Public API:
     load_consumption(path)                 -> raw DataFrame (DatetimeIndex)
+    detect_household_column(df)            -> household column name, if long format
+    is_long_frame(df)                      -> True for multi-household long format
     clean_series(df)                       -> cleaned, gap-filled daily series
     chronological_split(df, ...)           -> {'train','val','test'} DataFrames
     make_windows(arr, input_len, horizon)  -> (X, y) numpy arrays
     load_and_prepare(path, ...)            -> prepared arrays + scaler + frames
     prepare_full_series(path, ...)         -> windows over the whole series (no split)
+
+Long-format (``date,household,consumption_kwh``) files are pooled by
+:func:`load_and_prepare`: every household is cleaned, split and windowed on its
+own timeline while one scaler is fit on the pooled TRAIN segment only, so the
+leakage guarantees above still hold across homes.
 
 Exogenous features (calendar / holidays / temperature, see `features.py`) are
 threaded through as optional extra input channels: when a `FeatureConfig` is
@@ -33,7 +40,7 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 from features import FeatureConfig, build_feature_matrix, temperature_for_dates
-from validation import validate_consumption_frame
+from validation import merge_reports, validate_consumption_frame
 
 DEFAULT_INPUT_LEN = 30
 DEFAULT_HORIZON = 7
@@ -41,6 +48,21 @@ DEFAULT_SPLITS = (0.70, 0.15, 0.15)
 
 _DATE_ALIASES = ("date", "datetime", "timestamp", "time", "ds")
 _VALUE_ALIASES = ("consumption_kwh", "consumption", "kwh", "energy_kwh", "value", "y")
+_HOUSEHOLD_ALIASES = ("household", "home", "meter", "site", "device", "house")
+
+
+def detect_household_column(df: pd.DataFrame) -> str | None:
+    """Return the household column name if the frame is in long format."""
+    lower = {c.lower().strip(): c for c in df.columns}
+    for a in _HOUSEHOLD_ALIASES:
+        if a in lower:
+            return lower[a]
+    return None
+
+
+def is_long_frame(df: pd.DataFrame) -> bool:
+    """True when ``df`` carries a household column (multi-household long format)."""
+    return "household" in df.columns
 
 
 def _detect_column(df: pd.DataFrame, aliases: tuple[str, ...], kind: str) -> str:
@@ -63,13 +85,20 @@ def load_consumption(
     path: str | Path,
     date_col: str | None = None,
     value_col: str | None = None,
+    household_col: str | None = None,
     validate: bool = True,
 ) -> pd.DataFrame:
-    """Load a CSV into a DatetimeIndex frame with a single `consumption_kwh` column.
+    """Load a CSV into a DatetimeIndex frame.
+
+    Single-household files (``date,consumption_kwh``) return one
+    ``consumption_kwh`` column. Long-format files with a household column
+    (``date,household,consumption_kwh``) additionally carry a ``household``
+    string column, so callers can pool several homes.
 
     With ``validate`` (the default) the raw file is checked first — see
-    :mod:`validation` — so malformed CSVs fail with an actionable message. The
-    per-column findings (row counts, warnings) are attached to
+    :mod:`validation` — so malformed CSVs fail with an actionable message.
+    Long-format files are validated one household at a time. The per-column
+    findings (row counts, warnings) are attached to
     ``frame.attrs["validation"]``.
     """
     path = Path(path)
@@ -81,10 +110,18 @@ def load_consumption(
 
     dcol = date_col or _detect_column(raw, _DATE_ALIASES, "date")
     vcol = value_col or _detect_column(raw, _VALUE_ALIASES, "consumption")
+    hcol = household_col or detect_household_column(raw)
 
     report = None
     if validate:
-        report = validate_consumption_frame(raw, dcol, vcol)
+        if hcol is None:
+            report = validate_consumption_frame(raw, dcol, vcol)
+        else:
+            reports = [
+                validate_consumption_frame(group, dcol, vcol)
+                for _, group in raw.groupby(raw[hcol], sort=False)
+            ]
+            report = merge_reports(reports)
 
     df = pd.DataFrame(
         {
@@ -92,6 +129,8 @@ def load_consumption(
             "consumption_kwh": pd.to_numeric(raw[vcol], errors="coerce"),
         }
     )
+    if hcol is not None:
+        df["household"] = raw[hcol].astype(str).to_numpy()
     df = df.dropna(subset=["date"]).set_index("date").sort_index()
     if report is not None:
         df.attrs["validation"] = report.as_dict()
@@ -214,6 +253,129 @@ def _scale(values: np.ndarray, scaler: StandardScaler) -> np.ndarray:
     return scaler.transform(np.asarray(values, dtype=float).reshape(-1, 1)).reshape(-1)
 
 
+def _save_scalers(
+    scaler: StandardScaler,
+    save_scaler: bool,
+    scaler_path: str | Path | None,
+    feature_scaler: StandardScaler | None,
+    feature_scaler_path: str | Path | None,
+) -> None:
+    if not save_scaler:
+        return
+    if scaler_path is not None:
+        Path(scaler_path).parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(scaler, scaler_path)
+    if feature_scaler is not None and feature_scaler_path is not None:
+        Path(feature_scaler_path).parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(feature_scaler, feature_scaler_path)
+
+
+def _load_and_prepare_long(
+    raw: pd.DataFrame,
+    *,
+    input_len: int,
+    horizon: int,
+    splits: tuple[float, float, float],
+    scaler: StandardScaler | None,
+    save_scaler: bool,
+    scaler_path: str | Path | None,
+    fill_limit: int,
+    feature_config: FeatureConfig | None,
+    temperature: pd.DataFrame | None,
+    feature_scaler: StandardScaler | None,
+    feature_scaler_path: str | Path | None,
+) -> dict:
+    """Pooled preparation for long-format (multi-household) data.
+
+    Each household is cleaned, split and windowed independently - so a gap or a
+    split boundary in one home never touches another - while a single scaler is
+    fit on the pooled TRAIN consumption and a single feature scaler on the pooled
+    TRAIN dates. Windows are concatenated across households per split.
+    """
+    households = sorted(raw["household"].unique())
+    per_split: dict[str, list[pd.DataFrame]] = {"train": [], "val": [], "test": []}
+    for household in households:
+        series = _dedupe_series(raw[raw["household"] == household][["consumption_kwh"]])
+        segments = chronological_split(series.to_frame(name="consumption_kwh"), *splits)
+        for name, frame in segments.items():
+            filled = _fill_daily_gaps(frame["consumption_kwh"], fill_limit)
+            filled["household"] = household
+            per_split[name].append(filled)
+
+    frames = {name: pd.concat(lst) for name, lst in per_split.items()}
+
+    if scaler is None:
+        train_vals = np.concatenate(
+            [f["consumption_kwh"].to_numpy() for f in per_split["train"]]
+        )
+        scaler = StandardScaler().fit(train_vals.reshape(-1, 1))
+
+    feature_columns: list[str] = []
+    feature_matrix: pd.DataFrame | None = None
+    features_scaled = pd.DataFrame(
+        index=pd.DatetimeIndex([], name="date"), dtype=float
+    )
+    if feature_config is not None and feature_config.enabled:
+        unique_index = pd.DatetimeIndex(
+            sorted(set(frames["train"].index) | set(frames["val"].index) | set(frames["test"].index))
+        )
+        temp = temperature
+        if temp is not None:
+            temp = temp[~temp.index.duplicated(keep="first")]
+        feature_matrix, feature_columns = build_feature_matrix(
+            unique_index, temperature=temp, config=feature_config
+        )
+        train_index = pd.DatetimeIndex(sorted(set(frames["train"].index)))
+        if feature_scaler is None:
+            feature_scaler = StandardScaler().fit(feature_matrix.loc[train_index].to_numpy())
+        features_scaled = pd.DataFrame(
+            feature_scaler.transform(feature_matrix.to_numpy()),
+            index=unique_index,
+            columns=feature_columns,
+        )
+
+    n_channels = 1 + len(feature_columns)
+    datasets: dict[str, dict[str, np.ndarray]] = {}
+    for name, split_frames in per_split.items():
+        Xs: list[np.ndarray] = []
+        ys: list[np.ndarray] = []
+        for frame in split_frames:
+            scaled = _scale(frame["consumption_kwh"].to_numpy(), scaler)
+            feats = features_scaled.reindex(frame.index).to_numpy() if feature_columns else None
+            try:
+                X, y = make_windows(scaled, input_len, horizon, features=feats)
+            except ValueError:
+                continue
+            Xs.append(X)
+            ys.append(y)
+        if Xs:
+            datasets[name] = {"X": np.concatenate(Xs), "y": np.concatenate(ys)}
+        else:
+            datasets[name] = {
+                "X": np.empty((0, input_len, n_channels), dtype=np.float32),
+                "y": np.empty((0, horizon), dtype=np.float32),
+            }
+
+    _save_scalers(scaler, save_scaler, scaler_path, feature_scaler, feature_scaler_path)
+
+    return {
+        "datasets": datasets,
+        "scaler": scaler,
+        "feature_scaler": feature_scaler,
+        "features": feature_matrix,
+        "features_scaled": features_scaled,
+        "feature_columns": feature_columns,
+        "feature_config": feature_config,
+        "frames": frames,
+        "frames_by_household": per_split,
+        "households": households,
+        "multi_household": True,
+        "series": pd.concat(frames.values()),
+        "input_len": input_len,
+        "horizon": horizon,
+    }
+
+
 def load_and_prepare(
     path: str | Path,
     input_len: int = DEFAULT_INPUT_LEN,
@@ -242,7 +404,24 @@ def load_and_prepare(
     of leading context; the same `feature_scaler`/`feature_config` must be reused
     at evaluation/prediction time to guarantee identical inputs.
     """
-    deduped = _dedupe_series(load_consumption(path, validate=validate))
+    loaded = load_consumption(path, validate=validate)
+    if is_long_frame(loaded):
+        return _load_and_prepare_long(
+            loaded,
+            input_len=input_len,
+            horizon=horizon,
+            splits=splits,
+            scaler=scaler,
+            save_scaler=save_scaler,
+            scaler_path=scaler_path,
+            fill_limit=fill_limit,
+            feature_config=feature_config,
+            temperature=temperature,
+            feature_scaler=feature_scaler,
+            feature_scaler_path=feature_scaler_path,
+        )
+
+    deduped = _dedupe_series(loaded)
     raw_frames = chronological_split(deduped.to_frame(name="consumption_kwh"), *splits)
     frames = {
         name: _fill_daily_gaps(frame["consumption_kwh"], fill_limit)
@@ -287,12 +466,7 @@ def load_and_prepare(
                 "y": np.empty((0, horizon), dtype=np.float32),
             }
 
-    if save_scaler and scaler_path is not None:
-        Path(scaler_path).parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(scaler, scaler_path)
-    if save_scaler and feature_scaler is not None and feature_scaler_path is not None:
-        Path(feature_scaler_path).parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(feature_scaler, feature_scaler_path)
+    _save_scalers(scaler, save_scaler, scaler_path, feature_scaler, feature_scaler_path)
 
     return {
         "datasets": datasets,
@@ -303,6 +477,7 @@ def load_and_prepare(
         "feature_columns": feature_columns,
         "feature_config": feature_config,
         "frames": frames,
+        "multi_household": False,
         "series": series,
         "input_len": input_len,
         "horizon": horizon,
@@ -335,7 +510,14 @@ def prepare_full_series(
     """
     if scaler is None:
         raise ValueError("prepare_full_series requires a fitted `scaler`.")
-    deduped = _dedupe_series(load_consumption(path, validate=validate))
+    loaded = load_consumption(path, validate=validate)
+    if is_long_frame(loaded):
+        raise ValueError(
+            "prepare_full_series (rolling-origin CV) supports single-household data "
+            "only; pass a long-format file to load_and_prepare for pooled training, "
+            "or run evaluation per household."
+        )
+    deduped = _dedupe_series(loaded)
     series = _fill_daily_gaps(deduped, fill_limit)["consumption_kwh"]
     scaled = _scale(series.to_numpy(), scaler)
 

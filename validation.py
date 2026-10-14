@@ -83,6 +83,33 @@ def _combined(messages: list[str]) -> str:
     return "Invalid consumption data:\n  - " + "\n  - ".join(messages)
 
 
+def merge_reports(reports: list[ValidationReport]) -> ValidationReport:
+    """Aggregate per-group reports (e.g. one per household) into a single one.
+
+    Hard-error counts and warnings are summed so a multi-household file fails or
+    warns exactly like the equivalent single-household one would.
+    """
+    if not reports:
+        return ValidationReport(n_rows=0)
+    merged = ValidationReport(n_rows=sum(r.n_rows for r in reports))
+    for attr in (
+        "n_bad_dates",
+        "n_missing_dates",
+        "n_bad_values",
+        "n_missing_values",
+        "n_negative",
+        "n_duplicate_dates",
+    ):
+        setattr(merged, attr, sum(getattr(r, attr) for r in reports))
+    merged.schema_engine = reports[0].schema_engine
+    merged.warnings = [w for r in reports for w in r.warnings]
+    for key in ("bad_dates", "bad_values", "negative"):
+        merged.examples[key] = [e for r in reports for e in r.examples.get(key, [])][
+            :DEFAULT_MAX_EXAMPLES
+        ]
+    return merged
+
+
 def validation_to_dataframe(report: ValidationReport) -> pd.DataFrame:
     """Render a report as a tidy ``check | status | count`` table.
 

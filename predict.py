@@ -39,7 +39,7 @@ from features import build_feature_matrix, temperature_for_dates
 from inference import feature_info, load_model, make_model_input, resolve_device
 from logging_utils import add_log_level_argument, get_logger, setup_logging
 from manifest import RunManifest, add_manifest_arguments
-from preprocessing import clean_series, load_consumption, load_scaler
+from preprocessing import clean_series, is_long_frame, load_consumption, load_scaler
 from report import build_excel, build_html
 from tariffs import (
     DEFAULT_PRESETS_PATH,
@@ -364,7 +364,13 @@ def _run(args: argparse.Namespace, log, manifest: RunManifest) -> None:
     input_len, horizon = ckpt["input_len"], ckpt["horizon"]
     scaler = load_scaler(args.scaler_path)
 
-    history = clean_series(load_consumption(args.input, validate=not args.no_validate))
+    raw_history = load_consumption(args.input, validate=not args.no_validate)
+    if is_long_frame(raw_history):
+        raise SystemExit(
+            f"{args.input} is multi-household long format; predict expects a single "
+            "household (date,consumption_kwh). Extract one household's history first."
+        )
+    history = clean_series(raw_history)
     if len(history) < input_len:
         raise SystemExit(
             f"Need at least {input_len} days of history, got {len(history)} from {args.input}."

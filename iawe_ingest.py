@@ -1,7 +1,9 @@
 """BijliPredict AI - iAWE ingestion helper.
 
 Converts the real iAWE (Indian Dataset for Ambient Water and Energy) electricity
-files into the `date,consumption_kwh` daily format used by the pipeline.
+files into the daily format used by the pipeline: `date,consumption_kwh` for one
+home, or `date,household,consumption_kwh` when several directories (one per home)
+are given. The long form feeds the pooled multi-household training path.
 
 How to get the data (done once, outside the repo):
 
@@ -111,29 +113,66 @@ def _integrate_to_daily(df: pd.DataFrame) -> pd.Series:
     return pd.Series(daily.to_numpy(), index=idx, name="consumption_kwh")
 
 
-def ingest(directory: Path, files: list[Path] | None = None) -> pd.DataFrame:
-    if files:
-        candidates = files
-    else:
-        csvs = sorted(directory.glob("**/*.csv"))
-        if not csvs:
-            raise FileNotFoundError(
-                f"No CSV files found under {directory}. Extract electricity.tar.gz "
-                "into data/raw/iawe/ first."
-            )
-        candidates = [p for p in csvs if _is_main_meter(p.name)]
-        if not candidates:
-            # Fall back to every file if detection is inconclusive.
-            candidates = csvs
+def _paths_for(directory: Path) -> list[Path]:
+    """Main-meter CSVs under ``directory`` (falling back to every CSV)."""
+    csvs = sorted(directory.glob("**/*.csv"))
+    if not csvs:
+        raise FileNotFoundError(
+            f"No CSV files found under {directory}. Extract electricity.tar.gz "
+            "into data/raw/iawe/ first."
+        )
+    candidates = [p for p in csvs if _is_main_meter(p.name)]
+    return candidates if candidates else csvs
 
-    daily_frames = [_integrate_to_daily(_read_power_csv(p)) for p in candidates]
-    combined = pd.concat(daily_frames, axis=1).sum(axis=1, skipna=True)
-    combined = combined.sort_index()
+
+def _daily_for(paths: list[Path]) -> pd.Series:
+    """Integrate the given meters into one date-indexed daily kWh series."""
+    frames = [_integrate_to_daily(_read_power_csv(p)) for p in paths]
+    combined = pd.concat(frames, axis=1).sum(axis=1, skipna=True)
+    return combined.sort_index()
+
+
+def ingest(
+    directory: Path | list[Path] | None = None,
+    files: list[Path] | None = None,
+) -> pd.DataFrame:
+    """Convert iAWE meter CSVs into daily consumption.
+
+    With one household (the default, ``--file``, or a single ``--dir``) the
+    result is wide: ``date,consumption_kwh``. With multiple directories the
+    result is long: ``date,household,consumption_kwh``, one row per home per
+    day, where ``household`` is the directory name.
+    """
+    directories = directory if isinstance(directory, list) else ([directory] if directory else [])
+
+    if files:
+        daily = _daily_for(files)
+        households = None
+    elif len(directories) > 1:
+        daily_map = {d.name: _daily_for(_paths_for(d)) for d in directories}
+        households = list(daily_map)
+    elif directories:
+        daily = _daily_for(_paths_for(directories[0]))
+        households = None
+    else:
+        raise ValueError("Provide at least one --dir or --file.")
+
+    if households is not None:
+        long_frames = []
+        for name, series in daily_map.items():
+            frame = pd.DataFrame(
+                {"date": series.index.strftime("%Y-%m-%d"), "consumption_kwh": series.round(3)}
+            )
+            frame.insert(1, "household", name)
+            long_frames.append(frame)
+        return pd.concat(long_frames, ignore_index=True).sort_values(
+            ["date", "household"], kind="stable"
+        )
 
     out = pd.DataFrame(
         {
-            "date": combined.index.strftime("%Y-%m-%d"),
-            "consumption_kwh": combined.round(3).to_numpy(),
+            "date": daily.index.strftime("%Y-%m-%d"),
+            "consumption_kwh": daily.round(3).to_numpy(),
         }
     )
     return out.reset_index(drop=True)
@@ -141,7 +180,13 @@ def ingest(directory: Path, files: list[Path] | None = None) -> pd.DataFrame:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Convert iAWE raw CSVs to daily kWh.")
-    p.add_argument("--dir", default="data/raw/iawe", help="directory with iAWE CSVs")
+    p.add_argument(
+        "--dir",
+        nargs="+",
+        default=None,
+        help="directory (or one directory per household) with iAWE CSVs; "
+        "multiple directories produce long-format output",
+    )
     p.add_argument("--file", nargs="*", default=None, help="explicit main-meter CSV path(s)")
     p.add_argument("--out", default="data/processed/daily_consumption.csv")
     return p
@@ -149,11 +194,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    directory = Path(args.dir)
+    directories = [Path(d) for d in args.dir] if args.dir else [Path("data/raw/iawe")]
     files = [Path(f) for f in args.file] if args.file else None
 
     try:
-        df = ingest(directory, files)
+        df = ingest(directories, files)
     except FileNotFoundError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         print("Hint: run generate_data.py for a synthetic dataset instead.", file=sys.stderr)
@@ -162,7 +207,10 @@ def main() -> None:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out, index=False)
-    print(f"iAWE ingested: {len(df)} days -> {args.out}")
+    if "household" in df.columns:
+        print(f"iAWE ingested: {len(df)} rows, {df['household'].nunique()} households -> {args.out}")
+    else:
+        print(f"iAWE ingested: {len(df)} days -> {args.out}")
     print(
         f"  consumption: mean={df['consumption_kwh'].mean():.2f} kWh  "
         f"min={df['consumption_kwh'].min():.2f}  max={df['consumption_kwh'].max():.2f}"

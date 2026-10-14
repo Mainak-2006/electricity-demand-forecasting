@@ -301,6 +301,12 @@ def _run(args: argparse.Namespace, log, manifest: RunManifest) -> None:
     y_test = prepared["datasets"]["test"]["y"]
     if len(X_test) == 0:
         raise SystemExit("No test windows available - dataset too short for the split.")
+    multi = bool(prepared.get("multi_household"))
+    if multi and args.cv == "rolling":
+        raise SystemExit(
+            "Rolling-origin CV is defined on a single time series; evaluate "
+            "long-format (multi-household) data without --cv, per household."
+        )
 
     # --- Predictions (scaled -> kWh) ---
     pred_scaled = predict(model, X_test, device)
@@ -342,8 +348,10 @@ def _run(args: argparse.Namespace, log, manifest: RunManifest) -> None:
     per_horizon_mae = [float(np.mean(np.abs(y_true[:, k] - y_pred[:, k]))) for k in range(horizon)]
 
     # --- Statistical baselines (optional; rolling SARIMAX / ETS forecasts) ---
+    # Single-series only: pooled windows across households have no one timeline
+    # to run a rolling statistical forecast over.
     stats = {}
-    if not args.no_stats_baselines:
+    if not args.no_stats_baselines and not multi:
         train_values = np.concatenate(
             [
                 prepared["frames"]["train"]["consumption_kwh"].to_numpy(),
@@ -359,62 +367,90 @@ def _run(args: argparse.Namespace, log, manifest: RunManifest) -> None:
         )
 
     # --- Reconstruct a per-date series by averaging overlapping forecasts ---
-    dates = prepared["frames"]["test"].index
-    pred_sum: dict = defaultdict(float)
-    pred_cnt: dict = defaultdict(int)
-    actual_by_date: dict = {}
-    for i in range(len(X_test)):
-        for k in range(horizon):
-            idx = i + input_len + k
-            if idx >= len(dates):
-                continue
-            d = dates[idx]
-            pred_sum[d] += float(y_pred[i, k])
-            pred_cnt[d] += 1
-            actual_by_date[d] = float(y_true[i, k])
-    plot_dates = sorted(actual_by_date)
-    plot_actual = np.array([actual_by_date[d] for d in plot_dates])
-    plot_pred = np.array([pred_sum[d] / pred_cnt[d] for d in plot_dates])
-
-    # --- Plot ---
-    fig, axes = plt.subplots(2, 1, figsize=(12, 8))
-    axes[0].plot(plot_dates, plot_actual, label="Actual", color="black", linewidth=1.2)
-    axes[0].plot(plot_dates, plot_pred, label="Predicted (avg)", color="tab:red", linewidth=1.2)
-    axes[0].set_title("Test period - actual vs predicted daily consumption")
-    axes[0].set_ylabel("kWh / day")
-    axes[0].legend()
-    axes[0].grid(alpha=0.3)
-
-    last = -1
-    d0 = input_len
-    if len(X_test) > 0:
-        td = [dates[i + d0] for i in range(horizon) if i + d0 < len(dates)]
-        axes[1].plot(td, y_true[last, : len(td)], "o-", label="Actual", color="black")
-        axes[1].plot(
-            td,
-            y_pred[last, : len(td)],
-            "s--",
-            label=f"{ckpt['model_type'].upper()} forecast",
-            color="tab:red",
-        )
-        axes[1].plot(
-            td, seasonal_naive[last, : len(td)], "^:", label="Seasonal-naive", color="tab:blue"
-        )
-        axes[1].set_title(f"Example {horizon}-day forecast (last test window)")
-        axes[1].set_ylabel("kWh / day")
-        axes[1].legend()
-        axes[1].grid(alpha=0.3)
-
-    fig.tight_layout()
     plot_path = out_dir / "forecast.png"
-    fig.savefig(plot_path, dpi=120)
-    plt.close(fig)
+    if multi:
+        # Pooled windows span several homes, so there is no single date axis to
+        # overlay; report per-horizon skill across the whole pool instead.
+        naive_horizon_mae = [
+            float(np.mean(np.abs(y_true[:, k] - seasonal_naive[:, k]))) for k in range(horizon)
+        ]
+        fig, ax = plt.subplots(figsize=(10, 4.5))
+        xs = np.arange(1, horizon + 1)
+        width = 0.38
+        ax.bar(xs - width / 2, per_horizon_mae, width, label=ckpt["model_type"].upper(), color="tab:red")
+        ax.bar(xs + width / 2, naive_horizon_mae, width, label="Seasonal-naive", color="tab:blue")
+        ax.set_title(f"Pooled multi-household test MAE by horizon (1..{horizon} days)")
+        ax.set_xlabel("Horizon (days ahead)")
+        ax.set_ylabel("MAE (kWh)")
+        ax.set_xticks(xs)
+        ax.legend()
+        ax.grid(alpha=0.3, axis="y")
+        fig.tight_layout()
+        fig.savefig(plot_path, dpi=120)
+        plt.close(fig)
+    else:
+        dates = prepared["frames"]["test"].index
+        pred_sum: dict = defaultdict(float)
+        pred_cnt: dict = defaultdict(int)
+        actual_by_date: dict = {}
+        for i in range(len(X_test)):
+            for k in range(horizon):
+                idx = i + input_len + k
+                if idx >= len(dates):
+                    continue
+                d = dates[idx]
+                pred_sum[d] += float(y_pred[i, k])
+                pred_cnt[d] += 1
+                actual_by_date[d] = float(y_true[i, k])
+        plot_dates = sorted(actual_by_date)
+        plot_actual = np.array([actual_by_date[d] for d in plot_dates])
+        plot_pred = np.array([pred_sum[d] / pred_cnt[d] for d in plot_dates])
+
+        # --- Plot ---
+        fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+        axes[0].plot(plot_dates, plot_actual, label="Actual", color="black", linewidth=1.2)
+        axes[0].plot(
+            plot_dates, plot_pred, label="Predicted (avg)", color="tab:red", linewidth=1.2
+        )
+        axes[0].set_title("Test period - actual vs predicted daily consumption")
+        axes[0].set_ylabel("kWh / day")
+        axes[0].legend()
+        axes[0].grid(alpha=0.3)
+
+        last = -1
+        d0 = input_len
+        if len(X_test) > 0:
+            td = [dates[i + d0] for i in range(horizon) if i + d0 < len(dates)]
+            axes[1].plot(td, y_true[last, : len(td)], "o-", label="Actual", color="black")
+            axes[1].plot(
+                td,
+                y_pred[last, : len(td)],
+                "s--",
+                label=f"{ckpt['model_type'].upper()} forecast",
+                color="tab:red",
+            )
+            axes[1].plot(
+                td,
+                seasonal_naive[last, : len(td)],
+                "^:",
+                label="Seasonal-naive",
+                color="tab:blue",
+            )
+            axes[1].set_title(f"Example {horizon}-day forecast (last test window)")
+            axes[1].set_ylabel("kWh / day")
+            axes[1].legend()
+            axes[1].grid(alpha=0.3)
+
+        fig.tight_layout()
+        fig.savefig(plot_path, dpi=120)
+        plt.close(fig)
 
     result = {
         "model": ckpt["model_type"],
         "data_path": str(args.data),
         "test_windows": int(len(X_test)),
         "horizon": horizon,
+        "multi_household": multi,
         "model_metrics": model_metrics,
         "baseline_metrics": baseline_metrics,
         "improvement_vs_seasonal_naive_pct": {
