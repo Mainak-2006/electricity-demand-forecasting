@@ -27,12 +27,15 @@ seed = 42
 deterministic = true
 device = "auto"
 splits = [0.70, 0.15, 0.15]
-features = "none"      # none | calendar | weather (see "Weather & features")
+features = "calendar"  # none | calendar | weather (see "Weather & features")
 city = "delhi"         # city for --features weather temperature
 
 [evaluate]
 device = "cpu"
 splits = [0.70, 0.15, 0.15]
+calibration_out = "artifacts/calibration.json"  # conformal intervals
+calibration_scale = "power"   # absolute | power (sigma = yhat ** gamma)
+calibration_gamma = 0.5       # variance-stabilising exponent for household load
 
 [predict]
 device = "cpu"
@@ -44,3 +47,4 @@ summary_out = "outputs/cost_summary.json"
 projection_plot_out = "outputs/cost_projection.png"
 projection_csv_out = "outputs/projection_90d.csv"
 excel_out = "outputs/bijli_report.xlsx"
+calibration_path = "artifacts/calibration.json"  # empty string skips intervals

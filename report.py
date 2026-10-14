@@ -50,6 +50,7 @@ def _summary_frame(cost: dict, evaluation: dict) -> pd.DataFrame:
     quarterly = proj.get("three_month_90d", {})
     model_m = evaluation.get("model_metrics", {})
     base_m = evaluation.get("baseline_metrics", {}).get("seasonal_naive_p7", {})
+    interval = cost.get("interval", {}).get("levels", {})
 
     rows = [
         ("Generated", _dt.datetime.now().strftime("%Y-%m-%d %H:%M")),
@@ -58,6 +59,16 @@ def _summary_frame(cost: dict, evaluation: dict) -> pd.DataFrame:
         ("", ""),
         ("7-day forecast (kWh)", round(cost.get("total_kwh", 0.0), 2)),
         ("7-day estimated bill (INR)", cost.get("estimated_bill_inr", 0.0)),
+    ]
+    for pct in sorted(interval):
+        band = interval[pct]
+        rows.append(
+            (
+                f"7-day bill {pct}% band (INR)",
+                f"{band.get('estimated_bill_lower_inr')} – {band.get('estimated_bill_upper_inr')}",
+            )
+        )
+    rows += [
         ("Monthly 30d (kWh)", round(monthly.get("total_kwh", 0.0), 2)),
         ("Monthly 30d bill (INR)", monthly.get("estimated_bill_inr", 0.0)),
         ("3-Month 90d (kWh)", round(quarterly.get("total_kwh", 0.0), 2)),
@@ -68,6 +79,15 @@ def _summary_frame(cost: dict, evaluation: dict) -> pd.DataFrame:
         ("Test WAPE % (model)", round(model_m.get("wape", 0.0), 2)),
         ("Test WAPE % (seasonal-naive)", round(base_m.get("wape", 0.0), 2)),
     ]
+    coverage = evaluation.get("calibration", {}).get("coverage", {})
+    for pct in sorted(coverage):
+        c = coverage[pct]
+        rows.append(
+            (
+                f"Coverage {float(pct) * 100:.0f}% (nominal {c.get('target', 0) * 100:.0f}%)",
+                f"{c.get('empirical', 0) * 100:.1f}%",
+            )
+        )
     return pd.DataFrame(rows, columns=["Item", "Value"])
 
 

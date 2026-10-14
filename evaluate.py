@@ -23,6 +23,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+import calibration
 from features import temperature_for_dates
 from inference import feature_info, load_model, predict, resolve_device
 from preprocessing import load_and_prepare, load_consumption, load_scaler
@@ -30,6 +31,7 @@ from preprocessing import load_and_prepare, load_consumption, load_scaler
 DEFAULT_DATA = "data/processed/daily_consumption.csv"
 DEFAULT_ARTIFACTS = "artifacts"
 DEFAULT_OUTPUTS = "outputs"
+DEFAULT_CALIBRATION = f"{DEFAULT_ARTIFACTS}/calibration.json"
 
 EPS = 1e-8
 
@@ -54,6 +56,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out-dir", default=DEFAULT_OUTPUTS)
     p.add_argument("--device", default="cpu", choices=["auto", "cpu", "cuda"])
     p.add_argument("--splits", type=float, nargs=3, default=(0.70, 0.15, 0.15))
+    p.add_argument(
+        "--calibration-out",
+        default=DEFAULT_CALIBRATION,
+        help="where to write the fitted conformal calibration JSON",
+    )
+    p.add_argument(
+        "--calibration-scale",
+        default=calibration.DEFAULT_SCALE,
+        choices=["absolute", "power"],
+        help="how interval width scales with the forecast level (see calibration.py)",
+    )
+    p.add_argument(
+        "--calibration-gamma",
+        type=float,
+        default=calibration.DEFAULT_GAMMA,
+        help="exponent for --calibration-scale power (sigma = yhat ** gamma)",
+    )
     p.add_argument(
         "--weather-file",
         default=None,
@@ -111,6 +130,24 @@ def main(args: argparse.Namespace | None = None) -> None:
 
     y_true = inv(y_test)
     y_pred = np.clip(inv(pred_scaled), 0.0, None)  # consumption is non-negative
+
+    # --- Conformal intervals: per-horizon widths calibrated on the val fold ---
+    X_val = prepared["datasets"]["val"]["X"]
+    y_val = prepared["datasets"]["val"]["y"]
+    calib = None
+    coverage = None
+    if len(X_val) > 0:
+        y_val_true = inv(y_val)
+        y_val_pred = np.clip(inv(predict(model, X_val, device)), 0.0, None)
+        calib = calibration.fit(
+            y_val_true,
+            y_val_pred,
+            levels=calibration.DEFAULT_LEVELS,
+            scale=args.calibration_scale,
+            gamma=args.calibration_gamma,
+        )
+        calibration.save(calib, args.calibration_out)
+        coverage = calibration.coverage_report(calib, y_true, y_pred)
 
     # --- Baselines (from the raw consumption channel of the input window) ---
     X_raw = inv(X_test[:, :, 0])
@@ -191,6 +228,15 @@ def main(args: argparse.Namespace | None = None) -> None:
         },
         "per_horizon_mae": per_horizon_mae,
     }
+    if coverage is not None:
+        result["calibration"] = {
+            "method": calib["method"],
+            "scale": calib["scale"],
+            "gamma": calib["gamma"],
+            "n_val": calib["n_cal"],
+            "path": str(args.calibration_out),
+            "coverage": coverage,
+        }
     json_path = out_dir / "evaluation.json"
     json_path.write_text(json.dumps(result, indent=2))
 
@@ -206,6 +252,18 @@ def main(args: argparse.Namespace | None = None) -> None:
     print(
         f"\nPer-horizon MAE (day 1..{horizon}): " + ", ".join(f"{v:.3f}" for v in per_horizon_mae)
     )
+    if coverage is not None:
+        print(
+            f"\nConformal intervals ({calib['scale']}"
+            + (f", gamma={calib['gamma']:g}" if calib["scale"] == "power" else "")
+            + f"; {calib['n_cal']} val windows):"
+        )
+        print(f"{'nominal':>10}{'empirical':>12}{'mean width':>13}")
+        for c in coverage.values():
+            print(
+                f"{c['target'] * 100:>9.0f}%{c['empirical'] * 100:>11.1f}%{c['mean_width']:>12.3f}"
+            )
+        print(f"Saved: {args.calibration_out}")
     print(f"\nSaved: {json_path}")
     print(f"Saved: {plot_path}")
 

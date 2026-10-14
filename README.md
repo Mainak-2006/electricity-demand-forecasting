@@ -121,8 +121,8 @@ consumption history. They are appended as extra input channels to every window
 
 | `--features` | Adds | Columns |
 | --- | --- | --- |
-| `none` (default) | nothing | – |
-| `calendar` | calendar + Indian public holidays | `dow_sin`, `dow_cos`, `month_sin`, `month_cos`, `is_weekend`, `is_holiday` |
+| `none` | nothing | – |
+| `calendar` (default) | calendar + Indian public holidays | `dow_sin`, `dow_cos`, `month_sin`, `month_cos`, `is_weekend`, `is_holiday` |
 | `weather` | calendar + holidays + Open-Meteo temperature | `temp_mean`, `temp_lag1..3`, `temp_roll7`, `cdd` |
 
 ```bash
@@ -147,18 +147,69 @@ bijli train --features weather --weather-file data/raw/weather/delhi.csv  # offl
   back to climatology as it extends past the forecast window.
 
 **Measured effect** on the synthetic dataset (GRU, window 30 / horizon 7,
-deterministic, same seed; test-split WAPE):
+`--deterministic`, seed 42; test-split WAPE):
 
 | Features | MAE | WAPE | vs. seasonal-naive |
 | --- | --- | --- | --- |
-| `none` | 0.691 | 10.57% | –24.4% |
-| `calendar` | **0.637** | **9.75%** | **–30.3%** |
-| `weather` | 0.704 | 10.77% | –22.9% |
+| `none` | 0.703 | 10.76% | –23.0% |
+| `calendar` | 0.699 | 10.70% | –23.4% |
+| `weather` | 0.709 | 10.85% | –22.3% |
 
-Calendar + holiday features cut WAPE by ~0.8pp. Temperature did **not** help
-here: the synthetic generator encodes a pure annual cycle with no weather
-coupling, so the six temperature channels add noise — a deliberate reminder to
-let the data, not intuition, pick features.
+Under the deterministic default the calendar/holiday features give only a
+**marginal** gain (10.70% vs 10.76% WAPE); temperature does **not** help here —
+the synthetic generator encodes a pure annual cycle with no weather coupling, so
+the six temperature channels add noise. A deliberate reminder to let the data,
+not intuition, pick features. (An earlier, non-deterministic comparison showed a
+larger calendar gain; that was run-to-run variance, not signal.)
+
+---
+
+## Prediction intervals
+
+Forecasts ship with **split-conformal** prediction intervals so a single kWh
+number becomes a range you can plan against. `evaluate.py` fits per-horizon
+residual quantiles on the **validation** fold and writes
+`artifacts/calibration.json` (plain JSON, no pickled sklearn objects), then
+reports empirical coverage:
+
+```
+$ uv run bijli evaluate --model-path artifacts/best_model.pt
+...
+Conformal intervals (power, gamma=0.5; 169 val windows):
+   nominal   empirical   mean width
+       80%       80.3%       2.137
+       90%       89.6%       2.788
+```
+
+The residual *score* is normalized by the forecast level,
+`s = |y - ŷ| / σ(ŷ)` with `σ(ŷ) = ŷ^γ` (`--calibration-scale power`, default
+`γ=0.5`). Household load error grows **sub-linearly** with the level, so this
+variance-stabilizing scale keeps interval coverage stable across the low- and
+high-consumption seasons — a plain absolute width under-covers the summer peak
+on the test split. Use `--calibration-scale absolute` for the classic constant
+width.
+
+`predict.py` reads the calibration file (override with `--calibration-path`, or
+pass an empty string to skip intervals) and adds:
+
+- `lower_80 / upper_80 / lower_90 / upper_90` columns to
+  `outputs/predictions.csv` and `outputs/projection_90d.csv`,
+- an `interval` block in `outputs/cost_summary.json` (total kWh and bill range
+  per level — bills stay monotonic in kWh through the slab tariff),
+- shaded 80% bands on `cost_forecast.png` and `cost_projection.png`,
+- `7-day bill 80% / 90% band` rows plus fitted-vs-nominal coverage rows in the
+  Excel `Summary` sheet.
+
+```bash
+uv run bijli evaluate --model-path artifacts/best_model.pt   # writes calibration.json
+uv run bijli predict  --model-path artifacts/best_model.pt   # uses it, if present
+```
+
+Design notes: intervals are finite-sample ordered statistics of the normalized
+validation scores; beyond the calibrated horizon the per-step quantile
+extrapolates as `q_H·√(h/H)`, and lower bounds are clipped at 0 kWh. Acceptance
+target is empirical 80%/90% coverage on the test split within ±3% of nominal —
+the current GRU lands at **80.3% / 89.6%**.
 
 ---
 
@@ -198,14 +249,15 @@ meter(s) over time into daily kWh.
 | --- | --- |
 | `artifacts/best_model.pt` | Best model weights + config + training history |
 | `artifacts/scaler.joblib` | Train-only fitted scaler (reused by evaluate/predict) |
-| `outputs/predictions.csv` | 7-day forecast (`date, predicted_kwh, estimated_cost_inr`) |
+| `artifacts/calibration.json` | Conformal interval widths (written by `evaluate.py`) |
+| `outputs/predictions.csv` | 7-day forecast (`date, predicted_kwh, lower_80, upper_80, lower_90, upper_90, estimated_cost_inr`) |
 | `outputs/forecast.png` | Actual-vs-predicted consumption plots |
-| `outputs/cost_forecast.png` | 7-day daily + cumulative cost chart |
-| `outputs/cost_projection.png` | 90-day cumulative cost projection chart |
-| `outputs/projection_90d.csv` | Per-day projected kWh / daily / cumulative cost |
-| `outputs/cost_summary.json` | Bill breakdown + monthly & 3-month projection |
+| `outputs/cost_forecast.png` | 7-day daily + cumulative cost chart (80% band shaded) |
+| `outputs/cost_projection.png` | 90-day cumulative cost projection chart (80% band shaded) |
+| `outputs/projection_90d.csv` | Per-day projected kWh / interval bounds / daily / cumulative cost |
+| `outputs/cost_summary.json` | Bill breakdown + monthly & 3-month projection + interval ranges |
 | `outputs/bijli_report.xlsx` | Multi-sheet Excel report (auto-built by `predict.py`) |
-| `outputs/evaluation.json` | MAE / RMSE / WAPE and baseline comparison |
+| `outputs/evaluation.json` | MAE / RMSE / WAPE, baseline comparison, coverage |
 
 ## Cost prediction
 
@@ -323,8 +375,8 @@ baselines:
 Baselines: **seasonal-naive (period 7)** — repeat the last observed week — and
 **persistence** — repeat the last observed day.
 
-On the default synthetic dataset the GRU meaningfully beats both baselines
-(e.g. WAPE ≈ 14% vs ≈ 19% for seasonal-naive).
+On the default synthetic dataset the GRU beats both baselines
+(e.g. WAPE ≈ 10.7% vs ≈ 14.0% for seasonal-naive and ≈ 17.0% for persistence).
 
 ---
 
@@ -342,9 +394,9 @@ bijli-predict-ai/
 │   ├── gru_model.py             # primary model
 │   └── lstm_model.py            # comparison model
 ├── tests/                       # pytest suite (cli, tariffs, preprocessing,
-│                                #   inference, weather, features)
+│                                #   inference, weather, features, calibration)
 ├── artifacts/                   # best_model.pt, scaler.joblib,
-│                                #   feature_scaler.joblib
+│                                #   feature_scaler.joblib, calibration.json
 ├── outputs/                     # predictions.csv, forecast.png, evaluation.json,
 │                                #   cost_forecast.png, cost_projection.png,
 │                                #   projection_90d.csv, cost_summary.json,
@@ -355,6 +407,7 @@ bijli-predict-ai/
 ├── preprocessing.py             # load / clean / split / window / scale
 ├── features.py                  # calendar / holiday / temperature features
 ├── weather.py                   # Open-Meteo archive + forecast + climatology
+├── calibration.py               # split-conformal prediction intervals
 ├── generate_data.py             # synthetic Indian household generator
 ├── iawe_ingest.py               # real iAWE -> daily kWh
 ├── tariffs.py                   # flat / slab / preset / fixed / tax bill calculation

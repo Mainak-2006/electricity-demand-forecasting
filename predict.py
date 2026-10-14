@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 import torch
 
+import calibration
 from features import build_feature_matrix, temperature_for_dates
 from inference import feature_info, load_model, make_model_input, resolve_device
 from preprocessing import clean_series, load_consumption, load_scaler
@@ -55,8 +56,10 @@ DEFAULT_PROJECTION_DAYS = 90
 DEFAULT_PROJECTION_PLOT = "outputs/cost_projection.png"
 DEFAULT_PROJECTION_CSV = "outputs/projection_90d.csv"
 DEFAULT_EXCEL = "outputs/bijli_report.xlsx"
+DEFAULT_CALIBRATION = "artifacts/calibration.json"
 MONTH_DAYS = 30
 QUARTER_DAYS = 90
+INTERVAL_LEVELS = (0.80, 0.90)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -115,6 +118,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--device", default="cpu", choices=["auto", "cpu", "cuda"])
     p.add_argument(
+        "--calibration-path",
+        default=DEFAULT_CALIBRATION,
+        help="conformal calibration JSON written by evaluate.py (empty to skip intervals)",
+    )
+    p.add_argument(
         "--weather-file",
         default=None,
         help="pre-fetched weather CSV for temperature features (checkpoint-dependent)",
@@ -146,7 +154,9 @@ def build_tariff(args: argparse.Namespace) -> Tariff:
     return tariff
 
 
-def save_cost_plot(dates, forecast, daily_costs, total_cost, path: Path) -> None:
+def save_cost_plot(
+    dates, forecast, daily_costs, total_cost, path: Path, band: tuple | None = None
+) -> None:
     fig, ax1 = plt.subplots(figsize=(11, 5))
     days = [f"Day {i}\n{d.date()}" for i, d in enumerate(dates, start=1)]
 
@@ -166,6 +176,11 @@ def save_cost_plot(dates, forecast, daily_costs, total_cost, path: Path) -> None
 
     ax2 = ax1.twinx()
     cumulative = pd.Series(daily_costs).cumsum().tolist()
+    if band is not None:
+        cum_lower, cum_upper = band
+        ax2.fill_between(
+            range(len(dates)), cum_lower, cum_upper, color="tab:blue", alpha=0.15, label="80% band"
+        )
     ax2.plot(days, cumulative, color="tab:blue", marker="o", label="Cumulative cost")
     ax2.set_ylabel("Cumulative cost (₹)", color="tab:blue")
     ax2.tick_params(axis="y", labelcolor="tab:blue")
@@ -228,7 +243,9 @@ def rolling_forecast(
     return preds[:total_days]
 
 
-def save_projection_plot(dates, daily_costs, path: Path, marks=(MONTH_DAYS, QUARTER_DAYS)) -> None:
+def save_projection_plot(
+    dates, daily_costs, path: Path, marks=(MONTH_DAYS, QUARTER_DAYS), band: tuple | None = None
+) -> None:
     cumulative = np.cumsum(daily_costs)
     fig, ax1 = plt.subplots(figsize=(12, 5))
     x = np.arange(len(daily_costs))
@@ -239,6 +256,9 @@ def save_projection_plot(dates, daily_costs, path: Path, marks=(MONTH_DAYS, QUAR
     ax1.set_title("Cost projection (rolling model forecast)")
 
     ax2 = ax1.twinx()
+    if band is not None:
+        cum_lower, cum_upper = band
+        ax2.fill_between(x, cum_lower, cum_upper, color="tab:blue", alpha=0.15, label="80% band")
     ax2.plot(x, cumulative, color="tab:blue", linewidth=1.8, label="Cumulative cost")
     ax2.set_ylabel("Cumulative cost (₹)", color="tab:blue")
     ax2.tick_params(axis="y", labelcolor="tab:blue")
@@ -271,6 +291,21 @@ def _period_summary(bill: dict) -> dict:
         "fixed_charge_inr": round(bill["fixed"], 2),
         "estimated_bill_inr": round(bill["total"], 2),
     }
+
+
+def _cumulative_bill(kwh, tariff) -> np.ndarray:
+    """Cumulative bill (INR) after each day, applying the tariff to the prefix."""
+    kwh = np.asarray(kwh, dtype=float)
+    return np.array([compute_bill(kwh[: i + 1], tariff)["total"] for i in range(len(kwh))])
+
+
+def _intervals(pred, calib, steps) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    """Lower/upper kWh bounds per level for a 1-D prediction sequence."""
+    out: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for level in INTERVAL_LEVELS:
+        lower, upper = calibration.apply(pred, calib, level, steps=steps)
+        out[int(round(level * 100))] = (np.asarray(lower), np.asarray(upper))
+    return out
 
 
 def main(args: argparse.Namespace | None = None) -> None:
@@ -347,6 +382,13 @@ def main(args: argparse.Namespace | None = None) -> None:
     monthly = compute_bill(projection[:MONTH_DAYS], tariff)
     quarterly = compute_bill(projection[:QUARTER_DAYS], tariff)
 
+    # --- Conformal intervals (optional; requires artifacts/calibration.json) ---
+    calib = None
+    if args.calibration_path and Path(args.calibration_path).exists():
+        calib = calibration.load(args.calibration_path)
+    forecast_iv = _intervals(forecast, calib, horizon) if calib else {}
+    projection_iv = _intervals(projection, calib, project_days) if calib else {}
+
     # --- Report ---
     print()
     print("BIJLIPREDICT AI")
@@ -367,6 +409,11 @@ def main(args: argparse.Namespace | None = None) -> None:
     if tariff.fixed:
         print(f"Fixed Charge       : ₹{bill['fixed']:.2f}")
     print(f"Estimated Bill     : ₹{bill['total']:.2f}")
+    if forecast_iv:
+        for pct in sorted(forecast_iv):
+            lo_bill = compute_bill(forecast_iv[pct][0], tariff)["total"]
+            hi_bill = compute_bill(forecast_iv[pct][1], tariff)["total"]
+            print(f"{pct}% bill interval  : ₹{lo_bill:.2f} – ₹{hi_bill:.2f}")
     print()
 
     print("Long-term cost projection (rolling forecast)")
@@ -383,29 +430,49 @@ def main(args: argparse.Namespace | None = None) -> None:
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(
-        {
-            "date": dates.strftime("%Y-%m-%d"),
-            "predicted_kwh": [round(v, 3) for v in forecast],
-            "estimated_cost_inr": [round(c, 2) for c in daily_costs],
-        }
-    ).to_csv(out, index=False)
+    forecast_cols: dict = {
+        "date": dates.strftime("%Y-%m-%d"),
+        "predicted_kwh": [round(v, 3) for v in forecast],
+    }
+    for pct in sorted(forecast_iv):
+        forecast_cols[f"lower_{pct}"] = [round(v, 3) for v in forecast_iv[pct][0]]
+        forecast_cols[f"upper_{pct}"] = [round(v, 3) for v in forecast_iv[pct][1]]
+    forecast_cols["estimated_cost_inr"] = [round(c, 2) for c in daily_costs]
+    pd.DataFrame(forecast_cols).to_csv(out, index=False)
 
-    save_cost_plot(dates, forecast, daily_costs, bill["total"], Path(args.plot_out))
+    forecast_band = None
+    if 80 in forecast_iv:
+        forecast_band = (
+            _cumulative_bill(forecast_iv[80][0], tariff),
+            _cumulative_bill(forecast_iv[80][1], tariff),
+        )
+    save_cost_plot(
+        dates, forecast, daily_costs, bill["total"], Path(args.plot_out), band=forecast_band
+    )
 
     proj_out = Path(args.projection_csv_out)
     proj_out.parent.mkdir(parents=True, exist_ok=True)
     cumulative = np.cumsum(proj_bill["daily_costs"])
-    pd.DataFrame(
-        {
-            "date": proj_dates.strftime("%Y-%m-%d"),
-            "projected_kwh": [round(v, 3) for v in projection],
-            "daily_cost_inr": [round(c, 2) for c in proj_bill["daily_costs"]],
-            "cumulative_cost_inr": [round(c, 2) for c in cumulative],
-        }
-    ).to_csv(proj_out, index=False)
+    proj_cols: dict = {
+        "date": proj_dates.strftime("%Y-%m-%d"),
+        "projected_kwh": [round(v, 3) for v in projection],
+    }
+    for pct in sorted(projection_iv):
+        proj_cols[f"lower_{pct}"] = [round(v, 3) for v in projection_iv[pct][0]]
+        proj_cols[f"upper_{pct}"] = [round(v, 3) for v in projection_iv[pct][1]]
+    proj_cols["daily_cost_inr"] = [round(c, 2) for c in proj_bill["daily_costs"]]
+    proj_cols["cumulative_cost_inr"] = [round(c, 2) for c in cumulative]
+    pd.DataFrame(proj_cols).to_csv(proj_out, index=False)
 
-    save_projection_plot(proj_dates, proj_bill["daily_costs"], Path(args.projection_plot_out))
+    projection_band = None
+    if 80 in projection_iv:
+        projection_band = (
+            _cumulative_bill(projection_iv[80][0], tariff),
+            _cumulative_bill(projection_iv[80][1], tariff),
+        )
+    save_projection_plot(
+        proj_dates, proj_bill["daily_costs"], Path(args.projection_plot_out), band=projection_band
+    )
 
     summary = {
         "forecast_days": horizon,
@@ -427,6 +494,23 @@ def main(args: argparse.Namespace | None = None) -> None:
             "project_days": project_days,
             "monthly_30d": _period_summary(monthly),
             "three_month_90d": _period_summary(quarterly),
+        },
+        "interval": {
+            "method": calib.get("method") if calib else None,
+            "levels": {
+                str(pct): {
+                    "level": pct / 100,
+                    "total_kwh_lower": round(float(np.sum(forecast_iv[pct][0])), 3),
+                    "total_kwh_upper": round(float(np.sum(forecast_iv[pct][1])), 3),
+                    "estimated_bill_lower_inr": round(
+                        compute_bill(forecast_iv[pct][0], tariff)["total"], 2
+                    ),
+                    "estimated_bill_upper_inr": round(
+                        compute_bill(forecast_iv[pct][1], tariff)["total"], 2
+                    ),
+                }
+                for pct in sorted(forecast_iv)
+            },
         },
     }
     Path(args.summary_out).write_text(json.dumps(summary, indent=2))

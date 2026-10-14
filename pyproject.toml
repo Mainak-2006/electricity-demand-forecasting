@@ -37,6 +37,7 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["models"]
 py-modules = [
+    "calibration",
     "cli",
     "evaluate",
     "features",
