@@ -44,6 +44,9 @@ Cost forecast + monthly / 3-month projection + outputs/bijli_report.xlsx (+ .htm
 - Python 3.12+ (tested on 3.14)
 - [uv](https://docs.astral.sh/uv/) (recommended) or plain `venv` + `pip`
 
+Optional extras: `serve` (JSON API), `ui` (Streamlit dashboard), `weather`,
+`stats` (SARIMAX/ETS baselines) and `validate` (pandera schema layer).
+
 ## Setup
 
 ```bash
@@ -104,7 +107,8 @@ bijli serve         # run the FastAPI forecast service (uvicorn)
 ```
 
 Optional extras: `serve` (FastAPI + uvicorn, for the API), `ui` (Streamlit
-dashboard), `weather` (HTTPS fetch via httpx), `stats` (SARIMAX / ETS baselines).
+dashboard), `weather` (HTTPS fetch via httpx), `stats` (SARIMAX / ETS baselines),
+`validate` (pandera input schema).
 
 ```bash
 uv sync --extra dev --extra serve   # dev tools + API test deps
@@ -115,6 +119,8 @@ Defaults (epochs, batch size, splits, output paths, …) live in
 
 ```bash
 bijli train --epochs 20            # override config.toml
+bijli train --log-level DEBUG      # verbose structured logging
+bijli predict --no-validate        # skip input-data validation
 bijli --config other.toml train    # use a different config file
 ```
 
@@ -346,6 +352,35 @@ meter(s) over time into daily kWh.
 
 ---
 
+## Data validation & run manifests
+
+Every entry point validates its input CSV before touching the pipeline. The
+dependency-free checks in `validation.py` enforce that the date and consumption
+columns exist, that every date parses and every value is numeric, and that there
+are at least a few rows. Duplicate timestamps, missing values and negative
+readings are reported as **warnings** because `clean_series` already averages
+duplicates, interpolates gaps and drops negatives. A bad file fails immediately
+with a row-annotated message:
+
+```
+ValueError: Invalid consumption data:
+  - 1 row(s) have an unparseable date in column 'date' (e.g. row 1: 'not-a-date').
+Fix the file, or pass validate=False to skip validation.
+```
+
+Installing the optional `validate` extra (`uv sync --extra validate`) adds a
+declarative **pandera** schema on top of the same contract; without it the
+built-in checks still run, so validation is always available. Skip validation
+per run with `--no-validate` (all commands) or `validate=False` (the Python API).
+
+Each run also writes a JSON **manifest** to `outputs/manifests/` recording the
+command and arguments, the git revision, input file hashes, output paths and
+durations — enough to audit or reproduce a result later. Use `--no-manifest` to
+disable, or `--manifest-dir PATH` to relocate. `--log-level DEBUG|INFO|WARNING|ERROR`
+controls structured progress logging (stderr) independently of stdout reports.
+
+---
+
 ## Outputs
 
 | Path | Description |
@@ -363,6 +398,7 @@ meter(s) over time into daily kWh.
 | `outputs/bijli_report.html` | Self-contained HTML report (auto-built by `predict.py` / `report.py`) |
 | `outputs/evaluation.json` | MAE / RMSE / WAPE, baseline comparison, coverage |
 | `outputs/evaluation_cv.json` | Per-fold + mean/std metrics (`evaluate.py --cv rolling`) |
+| `outputs/manifests/*.json` | Per-run provenance (command, args, git sha, input hashes, durations) |
 
 ## Cost prediction
 
@@ -556,7 +592,7 @@ bijli-predict-ai/
 ## Testing & quality
 
 ```bash
-uv sync --extra dev --extra serve   # or: pip install pytest ruff fastapi httpx
+uv sync --extra dev --extra serve --extra validate   # or: pip install pytest ruff fastapi httpx pandera
 make test             # run the unit tests (pytest)
 make lint             # lint (ruff check .)
 ```
@@ -577,5 +613,7 @@ so repeated runs produce identical artifacts.
 - Predictions are clipped to be **non-negative** (consumption cannot be
   negative).
 - All random seeds are fixed (`--seed`, default 42) for reproducibility.
+- Input CSVs are validated up front (see *Data validation & run manifests*), and
+  every run writes a provenance manifest with input hashes and the git revision.
 - This is a reproducible forecasting experiment with a thin local serving layer —
   not a hardened, authenticated production service.

@@ -33,6 +33,7 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 from features import FeatureConfig, build_feature_matrix, temperature_for_dates
+from validation import validate_consumption_frame
 
 DEFAULT_INPUT_LEN = 30
 DEFAULT_HORIZON = 7
@@ -62,8 +63,15 @@ def load_consumption(
     path: str | Path,
     date_col: str | None = None,
     value_col: str | None = None,
+    validate: bool = True,
 ) -> pd.DataFrame:
-    """Load a CSV into a DatetimeIndex frame with a single `consumption_kwh` column."""
+    """Load a CSV into a DatetimeIndex frame with a single `consumption_kwh` column.
+
+    With ``validate`` (the default) the raw file is checked first — see
+    :mod:`validation` — so malformed CSVs fail with an actionable message. The
+    per-column findings (row counts, warnings) are attached to
+    ``frame.attrs["validation"]``.
+    """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Data file not found: {path}")
@@ -74,6 +82,10 @@ def load_consumption(
     dcol = date_col or _detect_column(raw, _DATE_ALIASES, "date")
     vcol = value_col or _detect_column(raw, _VALUE_ALIASES, "consumption")
 
+    report = None
+    if validate:
+        report = validate_consumption_frame(raw, dcol, vcol)
+
     df = pd.DataFrame(
         {
             "date": pd.to_datetime(raw[dcol], errors="coerce"),
@@ -81,6 +93,8 @@ def load_consumption(
         }
     )
     df = df.dropna(subset=["date"]).set_index("date").sort_index()
+    if report is not None:
+        df.attrs["validation"] = report.as_dict()
     return df
 
 
@@ -213,6 +227,7 @@ def load_and_prepare(
     temperature: pd.DataFrame | None = None,
     feature_scaler: StandardScaler | None = None,
     feature_scaler_path: str | Path | None = None,
+    validate: bool = True,
 ) -> dict:
     """Full preprocessing pipeline: load -> clean -> split -> scale -> window.
 
@@ -227,7 +242,7 @@ def load_and_prepare(
     of leading context; the same `feature_scaler`/`feature_config` must be reused
     at evaluation/prediction time to guarantee identical inputs.
     """
-    deduped = _dedupe_series(load_consumption(path))
+    deduped = _dedupe_series(load_consumption(path, validate=validate))
     raw_frames = chronological_split(deduped.to_frame(name="consumption_kwh"), *splits)
     frames = {
         name: _fill_daily_gaps(frame["consumption_kwh"], fill_limit)
@@ -304,6 +319,7 @@ def prepare_full_series(
     temperature: pd.DataFrame | None = None,
     feature_scaler: StandardScaler | None = None,
     weather_file: str | Path | None = None,
+    validate: bool = True,
 ) -> dict:
     """Build sliding windows over the *entire* cleaned series (no splitting).
 
@@ -319,7 +335,7 @@ def prepare_full_series(
     """
     if scaler is None:
         raise ValueError("prepare_full_series requires a fitted `scaler`.")
-    deduped = _dedupe_series(load_consumption(path))
+    deduped = _dedupe_series(load_consumption(path, validate=validate))
     series = _fill_daily_gaps(deduped, fill_limit)["consumption_kwh"]
     scaled = _scale(series.to_numpy(), scaler)
 

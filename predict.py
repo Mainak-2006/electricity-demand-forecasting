@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import matplotlib
@@ -36,6 +37,8 @@ import torch
 import calibration
 from features import build_feature_matrix, temperature_for_dates
 from inference import feature_info, load_model, make_model_input, resolve_device
+from logging_utils import add_log_level_argument, get_logger, setup_logging
+from manifest import RunManifest, add_manifest_arguments
 from preprocessing import clean_series, load_consumption, load_scaler
 from report import build_excel, build_html
 from tariffs import (
@@ -133,6 +136,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="pre-fetched weather CSV for temperature features (checkpoint-dependent)",
     )
+    p.add_argument(
+        "--no-validate",
+        action="store_true",
+        help="skip input-data validation (see validation.py)",
+    )
+    add_log_level_argument(p)
+    add_manifest_arguments(p)
     return p
 
 
@@ -317,15 +327,44 @@ def _intervals(pred, calib, steps) -> dict[int, tuple[np.ndarray, np.ndarray]]:
 def main(args: argparse.Namespace | None = None) -> None:
     if args is None:
         args = build_parser().parse_args()
+    setup_logging(args.log_level)
+    log = get_logger("predict")
+    manifest = RunManifest(
+        "predict",
+        args=vars(args),
+        manifest_dir=args.manifest_dir,
+        enabled=not args.no_manifest,
+    )
+    manifest.add_input("input", args.input)
+    manifest.add_input("model", args.model_path)
+    manifest.add_input("scaler", args.scaler_path)
+    try:
+        _run(args, log, manifest)
+    except Exception as exc:
+        manifest.set("error", f"{type(exc).__name__}: {exc}")
+        manifest.write(status="error", error=f"{type(exc).__name__}: {exc}")
+        raise
+    path = manifest.write()
+    log.info("event=run_end command=predict status=ok manifest=%s", path)
+
+
+def _run(args: argparse.Namespace, log, manifest: RunManifest) -> None:
+    start = time.perf_counter()
     device = resolve_device(args.device)
     tariff = build_tariff(args)
+    log.info(
+        "event=run_start command=predict device=%s tariff=%s project_days=%d",
+        device,
+        tariff.describe(),
+        args.project_days,
+    )
 
     bundle = load_model(args.model_path, device)
     model, ckpt = bundle["model"], bundle["ckpt"]
     input_len, horizon = ckpt["input_len"], ckpt["horizon"]
     scaler = load_scaler(args.scaler_path)
 
-    history = clean_series(load_consumption(args.input))
+    history = clean_series(load_consumption(args.input, validate=not args.no_validate))
     if len(history) < input_len:
         raise SystemExit(
             f"Need at least {input_len} days of history, got {len(history)} from {args.input}."
@@ -541,6 +580,26 @@ def main(args: argparse.Namespace | None = None) -> None:
         html_path = build_html(out.parent, args.html_out)
         print("HTML report saved:")
         print(str(html_path))
+
+    manifest.add_output("predictions", out)
+    manifest.add_output("cost_plot", args.plot_out)
+    manifest.add_output("projection_plot", args.projection_plot_out)
+    manifest.add_output("projection_csv", proj_out)
+    manifest.add_output("summary", args.summary_out)
+    if args.excel_out:
+        manifest.add_output("excel_report", args.excel_out)
+    if args.html_out:
+        manifest.add_output("html_report", args.html_out)
+    manifest.set("device", str(device))
+    manifest.set("tariff", bill["tariff"])
+    manifest.set("total_kwh", round(bill["total_kwh"], 3))
+    manifest.set("estimated_bill_inr", round(bill["total"], 2))
+    manifest.record_duration("predict", time.perf_counter() - start)
+    log.info(
+        "event=predict_complete total_kwh=%.3f estimated_bill_inr=%.2f",
+        bill["total_kwh"],
+        bill["total"],
+    )
 
 
 if __name__ == "__main__":

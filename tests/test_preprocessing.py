@@ -10,6 +10,7 @@ from preprocessing import (
     chronological_split,
     clean_series,
     load_and_prepare,
+    load_consumption,
     make_windows,
 )
 
@@ -80,3 +81,26 @@ def test_scaler_fit_on_train_only(tmp_path):
     assert prepared["scaler"].mean_[0] == pytest.approx(vals[:n_train].mean())
     assert len(prepared["datasets"]["test"]["X"]) > 0
     assert prepared["frames"]["train"].index.max() < prepared["frames"]["test"].index.min()
+
+
+def test_load_consumption_validates_by_default(tmp_path):
+    path = tmp_path / "bad.csv"
+    pd.DataFrame(
+        {"date": ["2023-01-01", "oops", "2023-01-03"], "consumption_kwh": [3.0, 3.1, 2.9]}
+    ).to_csv(path, index=False)
+    with pytest.raises(ValueError, match="unparseable date"):
+        load_consumption(path, validate=True)
+    # validate=False preserves the old permissive behaviour (bad date dropped).
+    out = load_consumption(path, validate=False)
+    assert len(out) == 2
+
+
+def test_load_consumption_attaches_report(tmp_path):
+    path = tmp_path / "warn.csv"
+    pd.DataFrame(
+        {"date": ["2023-01-01", "2023-01-02", "2023-01-03"], "consumption_kwh": [3.0, -1.0, 2.9]}
+    ).to_csv(path, index=False)
+    out = load_consumption(path, validate=True)
+    report = out.attrs["validation"]
+    assert report["ok"] is True
+    assert report["n_negative"] == 1

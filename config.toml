@@ -14,6 +14,8 @@ seed = 42
 raw_out = "data/raw/synthetic_household.csv"
 processed_out = "data/processed/daily_consumption.csv"
 sample_input = "data/sample_input.csv"
+log_level = "INFO"          # DEBUG | INFO | WARNING | ERROR
+manifest_dir = "outputs/manifests"
 
 [train]
 model = "gru"          # gru | lstm
@@ -29,6 +31,8 @@ device = "auto"
 splits = [0.70, 0.15, 0.15]
 features = "calendar"  # none | calendar | weather (see "Weather & features")
 city = "delhi"         # city for --features weather temperature
+log_level = "INFO"          # DEBUG | INFO | WARNING | ERROR
+manifest_dir = "outputs/manifests"
 
 [evaluate]
 device = "cpu"
@@ -38,6 +42,8 @@ calibration_scale = "power"   # absolute | power (sigma = yhat ** gamma)
 calibration_gamma = 0.5       # variance-stabilising exponent for household load
 cv = "none"                   # none | rolling (expanding-window origin CV)
 cv_folds = 5                  # folds for --cv rolling
+log_level = "INFO"            # DEBUG | INFO | WARNING | ERROR
+manifest_dir = "outputs/manifests"
 
 [predict]
 device = "cpu"
@@ -51,3 +57,5 @@ projection_csv_out = "outputs/projection_90d.csv"
 excel_out = "outputs/bijli_report.xlsx"
 html_out = "outputs/bijli_report.html"  # empty string skips the HTML report
 calibration_path = "artifacts/calibration.json"  # empty string skips intervals
+log_level = "INFO"            # DEBUG | INFO | WARNING | ERROR
+manifest_dir = "outputs/manifests"

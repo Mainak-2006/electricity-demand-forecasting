@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import os
 import random
+import time
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +19,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from features import FeatureConfig, temperature_for_dates
 from inference import resolve_device
+from logging_utils import add_log_level_argument, get_logger, setup_logging
+from manifest import RunManifest, add_manifest_arguments
 from models import get_model
 from preprocessing import load_and_prepare, load_consumption
 
@@ -112,17 +115,52 @@ def build_parser() -> argparse.ArgumentParser:
         default=(0.70, 0.15, 0.15),
         metavar=("TRAIN", "VAL", "TEST"),
     )
+    p.add_argument(
+        "--no-validate",
+        action="store_true",
+        help="skip input-data validation (see validation.py)",
+    )
+    add_log_level_argument(p)
+    add_manifest_arguments(p)
     return p
 
 
 def main(args: argparse.Namespace | None = None) -> None:
     if args is None:
         args = build_parser().parse_args()
+    setup_logging(args.log_level)
+    log = get_logger("train")
+    manifest = RunManifest(
+        "train",
+        args=vars(args),
+        manifest_dir=args.manifest_dir,
+        enabled=not args.no_manifest,
+    )
+    manifest.add_input("data", args.data)
+    try:
+        _run(args, log, manifest)
+    except Exception as exc:
+        manifest.set("error", f"{type(exc).__name__}: {exc}")
+        manifest.write(status="error", error=f"{type(exc).__name__}: {exc}")
+        raise
+    path = manifest.write()
+    log.info("event=run_end command=train status=ok manifest=%s", path)
+
+
+def _run(args: argparse.Namespace, log, manifest: RunManifest) -> None:
+    start = time.perf_counter()
     if args.deterministic:
         enable_determinism(args.seed)
     else:
         set_seed(args.seed)
     device = resolve_device(args.device)
+    log.info(
+        "event=run_start command=train model=%s device=%s features=%s deterministic=%s",
+        args.model,
+        device,
+        args.features,
+        args.deterministic,
+    )
 
     artifacts = Path(args.artifacts_dir)
     artifacts.mkdir(parents=True, exist_ok=True)
@@ -132,7 +170,7 @@ def main(args: argparse.Namespace | None = None) -> None:
     feature_config = resolve_feature_config(args)
     temperature = None
     if feature_config.temperature:
-        raw = load_consumption(args.data)
+        raw = load_consumption(args.data, validate=not args.no_validate)
         temperature = temperature_for_dates(
             feature_config, raw.index, weather_file=args.weather_file
         )
@@ -147,6 +185,7 @@ def main(args: argparse.Namespace | None = None) -> None:
         feature_config=feature_config,
         temperature=temperature,
         feature_scaler_path=feature_scaler_path,
+        validate=not args.no_validate,
     )
     data = prepared["datasets"]
     feature_columns = prepared["feature_columns"]
@@ -163,7 +202,7 @@ def main(args: argparse.Namespace | None = None) -> None:
     if len(X_train) == 0:
         raise SystemExit("No training windows produced - dataset too short.")
     if len(X_val) == 0:
-        print("WARNING: empty validation set; early stopping disabled.")
+        log.warning("event=empty_validation action=disable_early_stopping")
         X_val, y_val = X_train, y_train
 
     train_generator = None
@@ -263,6 +302,24 @@ def main(args: argparse.Namespace | None = None) -> None:
     print(f"Scaler saved  : {scaler_path}")
     if feature_columns:
         print(f"Feat scaler   : {feature_scaler_path}")
+
+    manifest.add_output("model", model_path)
+    manifest.add_output("scaler", scaler_path)
+    if feature_columns:
+        manifest.add_output("feature_scaler", feature_scaler_path)
+    manifest.set("device", str(device))
+    manifest.set("feature_columns", feature_columns)
+    manifest.set("train_windows", int(len(X_train)))
+    manifest.set("val_windows", int(len(X_val)))
+    manifest.set("epochs_trained", len(history["train_loss"]))
+    manifest.set("best_val_loss", best_val)
+    manifest.record_duration("train", time.perf_counter() - start)
+    log.info(
+        "event=train_complete epochs=%d best_val_loss=%.5f hours=%.4f",
+        len(history["train_loss"]),
+        best_val,
+        (time.perf_counter() - start) / 3600.0,
+    )
 
 
 if __name__ == "__main__":

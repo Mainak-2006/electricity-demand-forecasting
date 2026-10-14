@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -33,6 +34,8 @@ import calibration
 import cv
 from features import temperature_for_dates
 from inference import feature_info, load_model, predict, resolve_device
+from logging_utils import add_log_level_argument, get_logger, setup_logging
+from manifest import RunManifest, add_manifest_arguments
 from preprocessing import load_and_prepare, load_consumption, load_scaler, prepare_full_series
 
 DEFAULT_DATA = "data/processed/daily_consumption.csv"
@@ -123,6 +126,7 @@ def rolling_cv(
         feature_config=feature_config,
         feature_scaler=feature_scaler,
         weather_file=args.weather_file,
+        validate=not getattr(args, "no_validate", False),
     )
     n = len(full["series"])
     train_end = len(prepared["frames"]["train"]) + len(prepared["frames"]["val"])
@@ -222,15 +226,46 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="skip the SARIMAX/ETS baselines (also skipped if the stats extra is missing)",
     )
+    p.add_argument(
+        "--no-validate",
+        action="store_true",
+        help="skip input-data validation (see validation.py)",
+    )
+    add_log_level_argument(p)
+    add_manifest_arguments(p)
     return p
 
 
 def main(args: argparse.Namespace | None = None) -> None:
     if args is None:
         args = build_parser().parse_args()
+    setup_logging(args.log_level)
+    log = get_logger("evaluate")
+    manifest = RunManifest(
+        "evaluate",
+        args=vars(args),
+        manifest_dir=args.manifest_dir,
+        enabled=not args.no_manifest,
+    )
+    manifest.add_input("data", args.data)
+    manifest.add_input("model", args.model_path)
+    manifest.add_input("scaler", args.scaler_path)
+    try:
+        _run(args, log, manifest)
+    except Exception as exc:
+        manifest.set("error", f"{type(exc).__name__}: {exc}")
+        manifest.write(status="error", error=f"{type(exc).__name__}: {exc}")
+        raise
+    path = manifest.write()
+    log.info("event=run_end command=evaluate status=ok manifest=%s", path)
+
+
+def _run(args: argparse.Namespace, log, manifest: RunManifest) -> None:
+    start = time.perf_counter()
     device = resolve_device(args.device)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    log.info("event=run_start command=evaluate device=%s cv=%s", device, args.cv)
 
     bundle = load_model(args.model_path, device)
     model, ckpt = bundle["model"], bundle["ckpt"]
@@ -245,7 +280,7 @@ def main(args: argparse.Namespace | None = None) -> None:
             raise SystemExit("Checkpoint expects features but records no feature scaler path.")
         feature_scaler = load_scaler(feature_scaler_path)
         if feature_config.temperature:
-            raw = load_consumption(args.data)
+            raw = load_consumption(args.data, validate=not args.no_validate)
             temperature = temperature_for_dates(
                 feature_config, raw.index, weather_file=args.weather_file
             )
@@ -260,6 +295,7 @@ def main(args: argparse.Namespace | None = None) -> None:
         feature_config=feature_config,
         temperature=temperature,
         feature_scaler=feature_scaler,
+        validate=not args.no_validate,
     )
     X_test = prepared["datasets"]["test"]["X"]
     y_test = prepared["datasets"]["test"]["y"]
@@ -472,6 +508,23 @@ def main(args: argparse.Namespace | None = None) -> None:
         print(f"Saved: {cv_out}")
     print(f"\nSaved: {json_path}")
     print(f"Saved: {plot_path}")
+
+    manifest.add_output("evaluation", json_path)
+    manifest.add_output("forecast_plot", plot_path)
+    if coverage is not None:
+        manifest.add_output("calibration", args.calibration_out)
+    if cv_result is not None:
+        manifest.add_output("evaluation_cv", cv_path)
+    manifest.set("device", str(device))
+    manifest.set("test_windows", int(len(X_test)))
+    manifest.set("model_metrics", model_metrics)
+    manifest.record_duration("evaluate", time.perf_counter() - start)
+    log.info(
+        "event=evaluate_complete wape=%.3f mae=%.3f test_windows=%d",
+        model_metrics["wape"],
+        model_metrics["mae"],
+        len(X_test),
+    )
 
 
 if __name__ == "__main__":

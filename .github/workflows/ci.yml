@@ -30,7 +30,7 @@ jobs:
       # pyproject pins torch to the CPU wheel index, so the locked install needs
       # no GPU/CUDA on the runner.
       - name: Install dependencies
-        run: uv sync --locked --extra dev --extra serve
+        run: uv sync --locked --extra dev --extra serve --extra validate
 
       - name: Lint (ruff)
         run: uv run ruff check .

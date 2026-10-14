@@ -24,6 +24,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from logging_utils import add_log_level_argument, get_logger, setup_logging
+from manifest import RunManifest, add_manifest_arguments
+
 DEFAULT_START = "2023-01-01"
 DEFAULT_DAYS = 3 * 365
 
@@ -99,24 +102,38 @@ def build_parser() -> argparse.ArgumentParser:
         default="data/sample_input.csv",
         help="last-30-day history used by predict.py",
     )
+    add_log_level_argument(p)
+    add_manifest_arguments(p)
     return p
 
 
 def main(args: argparse.Namespace | None = None) -> None:
     if args is None:
         args = build_parser().parse_args()
+    setup_logging(args.log_level)
+    log = get_logger("data")
 
     df = generate_series(start=args.start, days=args.days, seed=args.seed)
+    log.info("event=generate_data days=%d seed=%d", len(df), args.seed)
+
+    manifest = RunManifest(
+        "data",
+        args=vars(args),
+        manifest_dir=args.manifest_dir,
+        enabled=not args.no_manifest,
+    )
 
     for path in (args.raw_out, args.processed_out):
         out = Path(path)
         out.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(out, index=False)
+        manifest.add_output(Path(path).stem, out)
 
     sample = Path(args.sample_input)
     sample.parent.mkdir(parents=True, exist_ok=True)
     # Last 30 days, matching the model's input window.
     df.tail(30).to_csv(sample, index=False)
+    manifest.add_output("sample_input", sample)
 
     print(f"Generated {len(df)} days: {df['date'].iloc[0]} -> {df['date'].iloc[-1]}")
     print(f"  raw        : {args.raw_out}")
@@ -126,6 +143,10 @@ def main(args: argparse.Namespace | None = None) -> None:
         f"  consumption: mean={df['consumption_kwh'].mean():.2f} kWh  "
         f"min={df['consumption_kwh'].min():.2f}  max={df['consumption_kwh'].max():.2f}"
     )
+
+    manifest.set("n_days", len(df))
+    manifest.write()
+    log.info("event=run_end command=data status=ok")
 
 
 if __name__ == "__main__":

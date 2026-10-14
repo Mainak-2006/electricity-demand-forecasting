@@ -16,3 +16,8 @@ uvicorn==0.54.0
 pydantic==2.14.1
 jinja2==3.1.6
 httpx==0.28.1
+
+# Optional: XML/statistical extras. `pip install statsmodels` for SARIMAX/ETS
+# baselines; `pip install pandera` for the declarative validation schema.
+# statsmodels==0.15.0
+# pandera==0.34.1

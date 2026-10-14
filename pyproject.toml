@@ -39,6 +39,9 @@ weather = [
 stats = [
     "statsmodels>=0.14",
 ]
+validate = [
+    "pandera>=0.20",
+]
 
 [project.scripts]
 bijli = "cli:main"
@@ -64,12 +67,15 @@ py-modules = [
     "generate_data",
     "iawe_ingest",
     "inference",
+    "logging_utils",
+    "manifest",
     "predict",
     "preprocessing",
     "report",
     "service",
     "tariffs",
     "train",
+    "validation",
     "weather",
 ]
 
