@@ -45,6 +45,7 @@ __all__ = [
     "MONTH_DAYS",
     "QUARTER_DAYS",
     "ServiceState",
+    "chart_columns",
     "compute_bill",
     "intervals",
     "load_service",
@@ -52,6 +53,16 @@ __all__ = [
     "resolve_tariff",
     "run_forecast",
 ]
+
+
+def chart_columns(frame: pd.DataFrame) -> list[str]:
+    """Point-forecast column plus any conformal band columns present.
+
+    Band columns (``lower_*`` / ``upper_*``) only exist when a calibration file
+    was loaded, so callers must not hard-code e.g. ``lower_80``.
+    """
+    bands = [c for c in frame.columns if c.startswith(("lower_", "upper_"))]
+    return ["predicted_kwh", *bands]
 
 
 @dataclass

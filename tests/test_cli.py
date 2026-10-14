@@ -36,6 +36,14 @@ def test_build_parser_applies_config_defaults():
     assert not hasattr(args, "unknown_key")  # unknown config keys are ignored
 
 
+def test_train_features_default_matches_config():
+    """`python train.py` and `bijli train` must agree on the feature default."""
+    config = cli.load_config(cli.DEFAULT_CONFIG)
+    parser = cli.build_parser("train", importlib.import_module("train"), config)
+    args = parser.parse_args([])
+    assert args.features == config["train"]["features"]
+
+
 # --- dispatch -------------------------------------------------------------
 
 

@@ -94,7 +94,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--features",
         choices=["none", "calendar", "weather"],
-        default="none",
+        default="calendar",
         help="exogenous features: 'calendar' adds calendar+holiday, 'weather' also temperature",
     )
     p.add_argument("--city", default="delhi", help="city for temperature features")

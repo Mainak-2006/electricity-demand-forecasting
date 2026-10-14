@@ -152,7 +152,7 @@ with tab_forecast:
     for pct in sorted(iv):
         forecast_df[f"lower_{pct}"] = [round(float(v), 3) for v in iv[pct][0]]
         forecast_df[f"upper_{pct}"] = [round(float(v), 3) for v in iv[pct][1]]
-    st.line_chart(forecast_df, x="date", y=["predicted_kwh", "lower_80", "upper_80"])
+    st.line_chart(forecast_df, x="date", y=service.chart_columns(forecast_df))
     st.dataframe(forecast_df, use_container_width=True)
 
 with tab_bill:
