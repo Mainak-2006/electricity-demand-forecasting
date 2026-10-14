@@ -1,0 +1,10 @@
+# BijliPredict AI - Python dependencies
+# Python 3.11+ (tested on 3.14)
+torch==2.14.1
+numpy==2.5.4
+pandas==3.0.6
+scikit-learn==1.9.1
+matplotlib==3.11.2
+joblib==1.6.0
+openpyxl==3.1.5
+jupyter==1.1.1

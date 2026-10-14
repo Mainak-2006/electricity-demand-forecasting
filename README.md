@@ -1,0 +1,302 @@
+# BijliPredict AI
+
+Electricity demand forecasting for Indian households — a local, ML-only MVP.
+
+A GRU neural network (with an LSTM comparison model) is trained on historical
+daily household electricity consumption and forecasts the **next 7 days** of
+usage, along with an estimated energy bill in Indian Rupees (₹).
+
+No frontend, backend, database, API or deployment. Everything runs locally in
+Python.
+
+---
+
+## Pipeline
+
+```text
+Historical dataset (CSV)
+        |
+        v
+Preprocessing (clean, gap-fill, chronological split, train-only scaling)
+        |
+        v
+Sliding windows: 30-day input  ->  7-day target
+        |
+        v
+GRU(64) -> Dropout(0.2) -> GRU(32) -> Dense(32, ReLU) -> Dense(7)
+        |
+        v
+Evaluation (MAE / RMSE / WAPE vs seasonal-naive baseline)
+        |
+        v
+outputs/predictions.csv + outputs/forecast.png + outputs/evaluation.json
+        |
+        v
+Cost forecast + monthly / 3-month projection + outputs/bijli_report.xlsx
+```
+
+---
+
+## Requirements
+
+- Python 3.11+ (tested on 3.14)
+- [uv](https://docs.astral.sh/uv/) (recommended) or plain `venv` + `pip`
+
+## Setup
+
+```bash
+# with uv (recommended)
+uv venv .venv
+uv pip install -p .venv -r requirements.txt
+
+# or with plain venv
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Activate the environment for the commands below:
+
+```bash
+source .venv/bin/activate
+```
+
+## Quickstart (runs fully offline)
+
+```bash
+# 1. Create a reproducible synthetic Indian household dataset (3 years of daily kWh).
+python generate_data.py
+
+# 2. Train the GRU model (saves artifacts/best_model.pt + artifacts/scaler.joblib).
+python train.py --model gru --epochs 100
+
+# 3. Evaluate on the held-out chronological test period.
+python evaluate.py
+
+# 4. Forecast the next 7 days, estimate the bill, and build the Excel report.
+python predict.py --input data/sample_input.csv --rate 7
+```
+
+The LSTM comparison model uses the same interface:
+
+```bash
+python train.py --model lstm --epochs 100
+python evaluate.py
+```
+
+---
+
+## Using real data
+
+The pipeline is dataset-agnostic: any CSV with a date column and a consumption
+column works. Recognised names include `date/datetime/timestamp` and
+`consumption_kwh/consumption/kwh/energy_kwh`.
+
+**Option A — your own CSV.** Drop it in `data/raw/` and train directly on it:
+
+```bash
+python train.py --data data/raw/my_household.csv
+```
+
+**Option B — the real iAWE dataset** (Indian Dataset for Ambient Water and
+Energy, one New Delhi home, ~73 days). Download `electricity.tar.gz` from
+<https://iawe.github.io/>, extract it to `data/raw/iawe/`, then:
+
+```bash
+python iawe_ingest.py --dir data/raw/iawe
+python train.py --data data/processed/daily_consumption.csv
+```
+
+`iawe_ingest.py` integrates the instantaneous active power (`W`) of the main
+meter(s) over time into daily kWh.
+
+> **Data limitation:** iAWE covers only ~73 days from a single household — too
+> short for a reliable, generalisable model. It is useful as a smoke test, which
+> is why `generate_data.py` provides a longer, reproducible series by default.
+
+---
+
+## Outputs
+
+| Path | Description |
+| --- | --- |
+| `artifacts/best_model.pt` | Best model weights + config + training history |
+| `artifacts/scaler.joblib` | Train-only fitted scaler (reused by evaluate/predict) |
+| `outputs/predictions.csv` | 7-day forecast (`date, predicted_kwh, estimated_cost_inr`) |
+| `outputs/forecast.png` | Actual-vs-predicted consumption plots |
+| `outputs/cost_forecast.png` | 7-day daily + cumulative cost chart |
+| `outputs/cost_projection.png` | 90-day cumulative cost projection chart |
+| `outputs/projection_90d.csv` | Per-day projected kWh / daily / cumulative cost |
+| `outputs/cost_summary.json` | Bill breakdown + monthly & 3-month projection |
+| `outputs/bijli_report.xlsx` | Multi-sheet Excel report (auto-built by `predict.py`) |
+| `outputs/evaluation.json` | MAE / RMSE / WAPE and baseline comparison |
+
+## Cost prediction
+
+`predict.py` forecasts **both consumption and cost** for each of the next 7 days.
+
+### Tariff options
+
+- **Flat rate** (default): `--rate` in ₹/kWh (default 7).
+- **Slab tariff** (typical Indian discom): `--slab "LOW-HIGH:RATE,..."`. Units are
+  charged progressively, e.g. the first 100 kWh at the first rate, the next 100
+  at the second, etc.
+- **Fixed charge** for the period: `--fixed` (₹).
+- **Tax / surcharge** on the energy charge: `--tax-pct` (%).
+
+```bash
+# Flat
+python predict.py --rate 7
+
+# Slabs + ₹50 fixed + 5% tax
+python predict.py --slab "0-100:3.5,100-200:4.5,200-400:6.5,400-100000:7" \
+    --fixed 50 --tax-pct 5
+```
+
+Bill = energy charge + tax + fixed charge. For slab tariffs the slabs are applied
+to the **period total** and each day is priced at the margin, so the per-day
+costs always sum to the period energy charge.
+
+### Monthly & 3-month projections
+
+Beyond the 7-day forecast, `predict.py` rolls the model forward
+**autoregressively** (`--project-days`, default 90) to estimate a **monthly
+(30-day)** and **3-month (90-day)** bill. Each predicted window is fed back as
+the next input.
+
+```bash
+python predict.py --rate 7 --project-days 90
+```
+
+```text
+Long-term cost projection (rolling forecast)
+  Monthly   (30 days):    107.0 kWh   Estimated Bill: ₹748.70
+  3-Month   (90 days):    327.5 kWh   Estimated Bill: ₹2292.24
+  NOTE: long-horizon rollout accumulates error; treat as an estimate.
+```
+
+> Long-horizon projections compound model error, so they are directional
+> estimates, not guarantees.
+
+### Excel report
+
+`predict.py` also assembles a single multi-sheet workbook at
+`outputs/bijli_report.xlsx` (sheets: `Summary`, `Forecast`, `Projection`,
+`Evaluation`, `Tariff`). Rebuild it from existing outputs at any time:
+
+```bash
+python report.py --outputs-dir outputs --out outputs/bijli_report.xlsx
+```
+
+The notebook (`notebooks/exploration.ipynb`) builds the same workbook and
+offers it as a download link.
+
+### Example prediction output
+
+```text
+BIJLIPREDICT AI
+-----------------------------
+
+Forecast Period: 7 Days
+Tariff: slab [0-100:₹3.5, 100-200:₹4.5, 200-400:₹6.5, 400-100000:₹7]
+
+Day 1: 3.0 kWh   ₹ 10.45   (2025-12-31)
+Day 2: 3.2 kWh   ₹ 11.05   (2026-01-01)
+...
+Day 7: 3.2 kWh   ₹ 11.07   (2026-01-06)
+
+-----------------------------
+Total Forecast: 24.5 kWh
+
+Energy Charge      : ₹85.76
+Tax (5%)           : ₹4.29
+Fixed Charge       : ₹50.00
+Estimated Bill     : ₹140.05
+
+Prediction saved:
+outputs/predictions.csv
+Cost chart saved:
+outputs/cost_forecast.png
+Bill summary saved:
+outputs/cost_summary.json
+```
+
+The estimate is indicative only — it does not model subsidies, time-of-day
+rates, or per-appliance breakdowns.
+
+---
+
+## Metrics
+
+Reported on the unseen chronological test period and compared against two naive
+baselines:
+
+- **MAE** — mean absolute error (kWh/day)
+- **RMSE** — root mean squared error (kWh/day)
+- **WAPE** — weighted absolute percentage error, `sum|y-ŷ| / sum|y|`
+- **MAPE** — mean absolute percentage error
+
+Baselines: **seasonal-naive (period 7)** — repeat the last observed week — and
+**persistence** — repeat the last observed day.
+
+On the default synthetic dataset the GRU meaningfully beats both baselines
+(e.g. WAPE ≈ 14% vs ≈ 19% for seasonal-naive).
+
+---
+
+## Project layout
+
+```text
+bijli-predict-ai/
+├── data/
+│   ├── raw/                     # source CSVs (synthetic or iAWE)
+│   ├── processed/               # daily_consumption.csv
+│   └── sample_input.csv         # last 30 days, used by predict.py
+├── notebooks/exploration.ipynb  # lightweight EDA
+├── models/
+│   ├── gru_model.py             # primary model
+│   └── lstm_model.py            # comparison model
+├── tests/                       # pytest suite (tariffs, preprocessing, inference)
+├── artifacts/                   # best_model.pt, scaler.joblib
+├── outputs/                     # predictions.csv, forecast.png, evaluation.json,
+│                                #   cost_forecast.png, cost_projection.png,
+│                                #   projection_90d.csv, cost_summary.json,
+│                                #   bijli_report.xlsx
+├── preprocessing.py             # load / clean / split / window / scale
+├── generate_data.py             # synthetic Indian household generator
+├── iawe_ingest.py               # real iAWE -> daily kWh
+├── tariffs.py                   # flat / slab / fixed / tax bill calculation
+├── inference.py                 # shared device selection + model loading
+├── report.py                    # multi-sheet Excel report builder
+├── train.py                     # training entrypoint
+├── evaluate.py                  # metrics + baselines + plot
+├── predict.py                   # 7-day consumption + cost forecast
+├── pyproject.toml               # ruff + pytest config, dev extras
+└── requirements.txt
+```
+
+---
+
+## Testing & quality
+
+```bash
+uv pip install -p .venv -r requirements.txt -e ".[dev]"   # or: pip install pytest ruff
+pytest        # run the unit tests
+ruff check .  # lint
+```
+
+---
+
+## Notes on correctness
+
+- The train/val/test split is **chronological**; the scaler is fitted on the
+  training segment only, so no test information leaks into training.
+- Gap filling is applied **per split segment**, so validation/test values can
+  never be interpolated into the training segment.
+- Model artifacts are loaded with `torch.load(..., weights_only=True)`, so a
+  tampered checkpoint cannot execute arbitrary code.
+- Predictions are clipped to be **non-negative** (consumption cannot be
+  negative).
+- All random seeds are fixed (`--seed`, default 42) for reproducibility.
+- This is a reproducible forecasting experiment, not a production prediction
+  service.

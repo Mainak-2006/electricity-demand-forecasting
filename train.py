@@ -1,0 +1,172 @@
+"""BijliPredict AI - train a GRU (or LSTM) 7-day electricity forecaster.
+
+Example:
+    python train.py --model gru --epochs 100
+"""
+
+from __future__ import annotations
+
+import argparse
+import random
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+
+from inference import resolve_device
+from models import get_model
+from preprocessing import load_and_prepare
+
+DEFAULT_DATA = "data/processed/daily_consumption.csv"
+DEFAULT_ARTIFACTS = "artifacts"
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def make_loader(X: np.ndarray, y: np.ndarray, batch_size: int, shuffle: bool) -> DataLoader:
+    ds = TensorDataset(torch.from_numpy(X), torch.from_numpy(y))
+    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, drop_last=False)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Train the BijliPredict forecaster.")
+    p.add_argument("--data", default=DEFAULT_DATA, help="processed consumption CSV")
+    p.add_argument("--model", choices=["gru", "lstm"], default="gru")
+    p.add_argument("--epochs", type=int, default=100)
+    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--window", type=int, default=30, help="input length (days)")
+    p.add_argument("--horizon", type=int, default=7, help="forecast length (days)")
+    p.add_argument("--patience", type=int, default=15, help="early-stopping patience")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+    p.add_argument("--artifacts-dir", default=DEFAULT_ARTIFACTS)
+    p.add_argument(
+        "--splits", type=float, nargs=3, default=(0.70, 0.15, 0.15),
+        metavar=("TRAIN", "VAL", "TEST"),
+    )
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    set_seed(args.seed)
+    device = resolve_device(args.device)
+
+    artifacts = Path(args.artifacts_dir)
+    artifacts.mkdir(parents=True, exist_ok=True)
+    scaler_path = artifacts / "scaler.joblib"
+
+    prepared = load_and_prepare(
+        args.data,
+        input_len=args.window,
+        horizon=args.horizon,
+        splits=tuple(args.splits),
+        scaler_path=scaler_path,
+        save_scaler=True,
+    )
+    data = prepared["datasets"]
+    X_train, y_train = data["train"]["X"], data["train"]["y"]
+    X_val, y_val = data["val"]["X"], data["val"]["y"]
+
+    print(f"Device : {device}")
+    print(f"Model  : {args.model.upper()}  (window={args.window}, horizon={args.horizon})")
+    print(f"Train  : {X_train.shape}   Val: {X_val.shape}")
+    if len(X_train) == 0:
+        raise SystemExit("No training windows produced - dataset too short.")
+    if len(X_val) == 0:
+        print("WARNING: empty validation set; early stopping disabled.")
+        X_val, y_val = X_train, y_train
+
+    train_loader = make_loader(X_train, y_train, args.batch_size, shuffle=True)
+    val_loader = make_loader(X_val, y_val, args.batch_size, shuffle=False)
+
+    model_config = {
+        "input_size": 1,
+        "hidden1": 64,
+        "hidden2": 32,
+        "dropout": 0.2,
+        "dense": 32,
+        "output_size": args.horizon,
+    }
+    model = get_model(args.model, **model_config).to(device)
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+
+    best_val = float("inf")
+    best_state = None
+    epochs_no_improve = 0
+    history = {"train_loss": [], "val_loss": []}
+
+    for epoch in range(1, args.epochs + 1):
+        model.train()
+        running = 0.0
+        for xb, yb in train_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            optimizer.zero_grad()
+            loss = criterion(model(xb), yb)
+            loss.backward()
+            optimizer.step()
+            running += loss.item() * len(xb)
+        train_loss = running / len(train_loader.dataset)
+
+        model.eval()
+        val_running = 0.0
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                val_running += criterion(model(xb), yb).item() * len(xb)
+        val_loss = val_running / len(val_loader.dataset)
+
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+
+        improved = val_loss < best_val - 1e-6
+        if improved:
+            best_val = val_loss
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+
+        if epoch == 1 or epoch % 10 == 0 or improved:
+            flag = " *" if improved else ""
+            print(f"epoch {epoch:3d}/{args.epochs}  train={train_loss:.5f}  val={val_loss:.5f}{flag}")
+
+        if args.patience > 0 and epochs_no_improve >= args.patience:
+            print(f"Early stopping at epoch {epoch} (no improvement for {args.patience}).")
+            break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    ckpt = {
+        "model_type": args.model,
+        "model_config": model_config,
+        "state_dict": model.state_dict(),
+        "input_len": args.window,
+        "horizon": args.horizon,
+        "scaler_path": str(scaler_path),
+        "history": history,
+        "epochs_trained": len(history["train_loss"]),
+        "best_val_loss": best_val,
+        "data_path": str(args.data),
+        "seed": args.seed,
+    }
+    model_path = artifacts / "best_model.pt"
+    torch.save(ckpt, model_path)
+
+    print(f"\nBest val loss : {best_val:.5f}")
+    print(f"Model saved   : {model_path}")
+    print(f"Scaler saved  : {scaler_path}")
+
+
+if __name__ == "__main__":
+    main()
