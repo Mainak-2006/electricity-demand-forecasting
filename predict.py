@@ -109,8 +109,14 @@ def save_cost_plot(dates, forecast, daily_costs, total_cost, path: Path) -> None
     ax1.tick_params(axis="y", labelcolor="tab:orange")
     ax1.set_title("Forecast electricity cost")
     for b, c in zip(bars, daily_costs, strict=True):
-        ax1.text(b.get_x() + b.get_width() / 2, b.get_height(), f"₹{c:.1f}",
-                 ha="center", va="bottom", fontsize=8)
+        ax1.text(
+            b.get_x() + b.get_width() / 2,
+            b.get_height(),
+            f"₹{c:.1f}",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
 
     ax2 = ax1.twinx()
     cumulative = pd.Series(daily_costs).cumsum().tolist()
@@ -231,9 +237,7 @@ def main() -> None:
     )
     forecast = projection[:horizon]
     dates = pd.date_range(last_date + pd.Timedelta(days=1), periods=horizon, freq="D")
-    proj_dates = pd.date_range(
-        last_date + pd.Timedelta(days=1), periods=project_days, freq="D"
-    )
+    proj_dates = pd.date_range(last_date + pd.Timedelta(days=1), periods=project_days, freq="D")
 
     bill = compute_bill(forecast, tariff)
     daily_costs = bill["daily_costs"]

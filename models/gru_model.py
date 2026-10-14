@@ -1,11 +1,11 @@
 """GRU forecasting model (primary architecture).
 
-    Input (30-day window)
-        -> GRU (64)
-        -> Dropout (0.2)
-        -> GRU (32)
-        -> Dense (32, ReLU)
-        -> Dense (7)          -> 7-day forecast
+Input (30-day window)
+    -> GRU (64)
+    -> Dropout (0.2)
+    -> GRU (32)
+    -> Dense (32, ReLU)
+    -> Dense (7)          -> 7-day forecast
 """
 
 from __future__ import annotations

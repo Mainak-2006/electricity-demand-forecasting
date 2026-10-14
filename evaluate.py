@@ -91,17 +91,15 @@ def main() -> None:
 
     # --- Baselines (from the raw input window) ---
     X_raw = inv(X_test)
-    seasonal_naive = X_raw[:, -horizon:]                      # repeat last week
-    persistence = np.repeat(X_raw[:, -1:], horizon, axis=1)   # repeat last day
+    seasonal_naive = X_raw[:, -horizon:]  # repeat last week
+    persistence = np.repeat(X_raw[:, -1:], horizon, axis=1)  # repeat last day
 
     model_metrics = compute_metrics(y_true, y_pred)
     baseline_metrics = {
         "seasonal_naive_p7": compute_metrics(y_true, seasonal_naive),
         "persistence": compute_metrics(y_true, persistence),
     }
-    per_horizon_mae = [
-        float(np.mean(np.abs(y_true[:, k] - y_pred[:, k]))) for k in range(horizon)
-    ]
+    per_horizon_mae = [float(np.mean(np.abs(y_true[:, k] - y_pred[:, k]))) for k in range(horizon)]
 
     # --- Reconstruct a per-date series by averaging overlapping forecasts ---
     dates = prepared["frames"]["test"].index
@@ -135,8 +133,16 @@ def main() -> None:
     if len(X_test) > 0:
         td = [dates[i + d0] for i in range(horizon) if i + d0 < len(dates)]
         axes[1].plot(td, y_true[last, : len(td)], "o-", label="Actual", color="black")
-        axes[1].plot(td, y_pred[last, : len(td)], "s--", label=f"{ckpt['model_type'].upper()} forecast", color="tab:red")
-        axes[1].plot(td, seasonal_naive[last, : len(td)], "^:", label="Seasonal-naive", color="tab:blue")
+        axes[1].plot(
+            td,
+            y_pred[last, : len(td)],
+            "s--",
+            label=f"{ckpt['model_type'].upper()} forecast",
+            color="tab:red",
+        )
+        axes[1].plot(
+            td, seasonal_naive[last, : len(td)], "^:", label="Seasonal-naive", color="tab:blue"
+        )
         axes[1].set_title(f"Example {horizon}-day forecast (last test window)")
         axes[1].set_ylabel("kWh / day")
         axes[1].legend()
@@ -155,8 +161,10 @@ def main() -> None:
         "model_metrics": model_metrics,
         "baseline_metrics": baseline_metrics,
         "improvement_vs_seasonal_naive_pct": {
-            "mae": 100.0 * (1 - model_metrics["mae"] / (baseline_metrics["seasonal_naive_p7"]["mae"] + EPS)),
-            "rmse": 100.0 * (1 - model_metrics["rmse"] / (baseline_metrics["seasonal_naive_p7"]["rmse"] + EPS)),
+            "mae": 100.0
+            * (1 - model_metrics["mae"] / (baseline_metrics["seasonal_naive_p7"]["mae"] + EPS)),
+            "rmse": 100.0
+            * (1 - model_metrics["rmse"] / (baseline_metrics["seasonal_naive_p7"]["rmse"] + EPS)),
         },
         "per_horizon_mae": per_horizon_mae,
     }
@@ -172,8 +180,9 @@ def main() -> None:
             f"{baseline_metrics['seasonal_naive_p7'][m]:>12.3f}"
             f"{baseline_metrics['persistence'][m]:>12.3f}"
         )
-    print(f"\nPer-horizon MAE (day 1..{horizon}): "
-          + ", ".join(f"{v:.3f}" for v in per_horizon_mae))
+    print(
+        f"\nPer-horizon MAE (day 1..{horizon}): " + ", ".join(f"{v:.3f}" for v in per_horizon_mae)
+    )
     print(f"\nSaved: {json_path}")
     print(f"Saved: {plot_path}")
 

@@ -76,7 +76,9 @@ def _read_power_csv(path: Path) -> pd.DataFrame:
     else:
         dt = pd.to_datetime(ts, errors="coerce", utc=True).dt.tz_convert("Asia/Kolkata")
 
-    out = pd.DataFrame({"datetime": dt.dt.tz_localize(None), "W": pd.to_numeric(df[w_col], errors="coerce")})
+    out = pd.DataFrame(
+        {"datetime": dt.dt.tz_localize(None), "W": pd.to_numeric(df[w_col], errors="coerce")}
+    )
     return out.dropna(subset=["datetime", "W"]).sort_values("datetime")
 
 
@@ -129,7 +131,10 @@ def ingest(directory: Path, files: list[Path] | None = None) -> pd.DataFrame:
     combined = combined.sort_index()
 
     out = pd.DataFrame(
-        {"date": combined.index.strftime("%Y-%m-%d"), "consumption_kwh": combined.round(3).to_numpy()}
+        {
+            "date": combined.index.strftime("%Y-%m-%d"),
+            "consumption_kwh": combined.round(3).to_numpy(),
+        }
     )
     return out.reset_index(drop=True)
 

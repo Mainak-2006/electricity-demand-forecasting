@@ -46,10 +46,10 @@ def test_parse_slabs_ok():
     "spec",
     [
         "0-100:3.5,150-200:4.5",  # gap between slabs
-        "50-100:3.5",             # does not start at 0
-        "100-50:3.5",             # lower bound >= upper bound
-        "0-100:-1",               # negative rate
-        "nonsense",               # unparseable
+        "50-100:3.5",  # does not start at 0
+        "100-50:3.5",  # lower bound >= upper bound
+        "0-100:-1",  # negative rate
+        "nonsense",  # unparseable
     ],
 )
 def test_parse_slabs_rejects_bad(spec):

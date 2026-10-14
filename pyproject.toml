@@ -2,7 +2,7 @@
 name = "bijli-predict-ai"
 version = "0.1.0"
 description = "Electricity demand forecasting for Indian households - GRU/LSTM MVP"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "torch==2.14.1",
     "numpy==2.5.4",
@@ -17,14 +17,25 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    "pre-commit>=3.7",
 ]
 notebook = [
     "jupyter==1.1.1",
 ]
 
+# Resolve PyTorch from the CPU wheel index so `uv.lock` is reproducible on
+# any machine and in CI, independent of local CUDA drivers.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 exclude = ["notebooks", ".venv"]
 
 [tool.ruff.lint]

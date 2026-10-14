@@ -7,6 +7,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import os
 import random
 from pathlib import Path
 
@@ -30,9 +31,26 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def make_loader(X: np.ndarray, y: np.ndarray, batch_size: int, shuffle: bool) -> DataLoader:
+def enable_determinism(seed: int) -> None:
+    """Seed every RNG and force deterministic kernels for reproducible runs."""
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    set_seed(seed)
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def make_loader(
+    X: np.ndarray,
+    y: np.ndarray,
+    batch_size: int,
+    shuffle: bool,
+    generator: torch.Generator | None = None,
+) -> DataLoader:
     ds = TensorDataset(torch.from_numpy(X), torch.from_numpy(y))
-    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, drop_last=False)
+    return DataLoader(
+        ds, batch_size=batch_size, shuffle=shuffle, drop_last=False, generator=generator
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,10 +64,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--horizon", type=int, default=7, help="forecast length (days)")
     p.add_argument("--patience", type=int, default=15, help="early-stopping patience")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="force deterministic kernels and seeded shuffling for reproducible runs",
+    )
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     p.add_argument("--artifacts-dir", default=DEFAULT_ARTIFACTS)
     p.add_argument(
-        "--splits", type=float, nargs=3, default=(0.70, 0.15, 0.15),
+        "--splits",
+        type=float,
+        nargs=3,
+        default=(0.70, 0.15, 0.15),
         metavar=("TRAIN", "VAL", "TEST"),
     )
     return p
@@ -57,7 +83,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    set_seed(args.seed)
+    if args.deterministic:
+        enable_determinism(args.seed)
+    else:
+        set_seed(args.seed)
     device = resolve_device(args.device)
 
     artifacts = Path(args.artifacts_dir)
@@ -85,7 +114,14 @@ def main() -> None:
         print("WARNING: empty validation set; early stopping disabled.")
         X_val, y_val = X_train, y_train
 
-    train_loader = make_loader(X_train, y_train, args.batch_size, shuffle=True)
+    train_generator = None
+    if args.deterministic:
+        train_generator = torch.Generator()
+        train_generator.manual_seed(args.seed)
+
+    train_loader = make_loader(
+        X_train, y_train, args.batch_size, shuffle=True, generator=train_generator
+    )
     val_loader = make_loader(X_val, y_val, args.batch_size, shuffle=False)
 
     model_config = {
@@ -138,7 +174,9 @@ def main() -> None:
 
         if epoch == 1 or epoch % 10 == 0 or improved:
             flag = " *" if improved else ""
-            print(f"epoch {epoch:3d}/{args.epochs}  train={train_loss:.5f}  val={val_loss:.5f}{flag}")
+            print(
+                f"epoch {epoch:3d}/{args.epochs}  train={train_loss:.5f}  val={val_loss:.5f}{flag}"
+            )
 
         if args.patience > 0 and epochs_no_improve >= args.patience:
             print(f"Early stopping at epoch {epoch} (no improvement for {args.patience}).")
@@ -159,6 +197,7 @@ def main() -> None:
         "best_val_loss": best_val,
         "data_path": str(args.data),
         "seed": args.seed,
+        "deterministic": args.deterministic,
     }
     model_path = artifacts / "best_model.pt"
     torch.save(ckpt, model_path)

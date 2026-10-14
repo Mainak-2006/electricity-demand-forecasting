@@ -157,9 +157,7 @@ def make_windows(
     n = len(values)
     n_windows = n - input_len - horizon + 1
     if n_windows <= 0:
-        raise ValueError(
-            f"Series too short ({n}) for window={input_len} + horizon={horizon}."
-        )
+        raise ValueError(f"Series too short ({n}) for window={input_len} + horizon={horizon}.")
 
     X = np.empty((n_windows, input_len, 1), dtype=np.float32)
     y = np.empty((n_windows, horizon), dtype=np.float32)
@@ -192,9 +190,7 @@ def load_and_prepare(
     arrays, the fitted scaler, and the split frames.
     """
     deduped = _dedupe_series(load_consumption(path))
-    raw_frames = chronological_split(
-        deduped.to_frame(name="consumption_kwh"), *splits
-    )
+    raw_frames = chronological_split(deduped.to_frame(name="consumption_kwh"), *splits)
     frames = {
         name: _fill_daily_gaps(frame["consumption_kwh"], fill_limit)
         for name, frame in raw_frames.items()

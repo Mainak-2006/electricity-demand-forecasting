@@ -58,9 +58,7 @@ def generate_series(
     # Annual seasonality: AC-driven summer peak near day-of-year ~165 (mid-June),
     # plus a small winter bump (geysers) near the start of the year.
     doy = dates.dayofyear.to_numpy()
-    summer = annual_amplitude * 0.5 * (
-        1.0 + np.cos(2.0 * np.pi * (doy - 165) / 365.25)
-    )
+    summer = annual_amplitude * 0.5 * (1.0 + np.cos(2.0 * np.pi * (doy - 165) / 365.25))
     winter = 0.9 * np.exp(-0.5 * ((doy - 10) / 25.0) ** 2)
 
     signal = base + growth + weekly + summer + winter
@@ -90,9 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--start", default=DEFAULT_START, help="start date (YYYY-MM-DD)")
     p.add_argument("--days", type=int, default=DEFAULT_DAYS, help="number of days")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument(
-        "--raw-out", default="data/raw/synthetic_household.csv", help="raw CSV path"
-    )
+    p.add_argument("--raw-out", default="data/raw/synthetic_household.csv", help="raw CSV path")
     p.add_argument(
         "--processed-out",
         default="data/processed/daily_consumption.csv",

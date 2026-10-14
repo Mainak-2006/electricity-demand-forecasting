@@ -39,21 +39,22 @@ Cost forecast + monthly / 3-month projection + outputs/bijli_report.xlsx
 
 ## Requirements
 
-- Python 3.11+ (tested on 3.14)
+- Python 3.12+ (tested on 3.14)
 - [uv](https://docs.astral.sh/uv/) (recommended) or plain `venv` + `pip`
 
 ## Setup
 
 ```bash
-# with uv (recommended)
-uv venv .venv
-uv pip install -p .venv -r requirements.txt
+# with uv (recommended) — creates .venv and installs locked deps + dev tools
+uv sync --extra dev
 
-# or with plain venv
+# or plain venv + pip
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+A `Makefile` wraps the common tasks (`make install | data | train | eval | predict | report | test | lint`).
 
 Activate the environment for the commands below:
 
@@ -280,10 +281,13 @@ bijli-predict-ai/
 ## Testing & quality
 
 ```bash
-uv pip install -p .venv -r requirements.txt -e ".[dev]"   # or: pip install pytest ruff
-pytest        # run the unit tests
-ruff check .  # lint
+uv sync --extra dev   # or: pip install pytest ruff
+make test             # run the unit tests (pytest)
+make lint             # lint (ruff check .)
 ```
+
+`make train` runs with `--deterministic` (seeded RNGs + deterministic kernels),
+so repeated runs produce identical artifacts.
 
 ---
 

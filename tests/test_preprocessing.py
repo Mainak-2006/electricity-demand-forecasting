@@ -63,9 +63,7 @@ def test_clean_series_fills_gap():
 
 
 def test_clean_series_dedupes_and_drops_negative():
-    idx = pd.to_datetime(
-        ["2023-01-01", "2023-01-01", "2023-01-02", "2023-01-03", "2023-01-04"]
-    )
+    idx = pd.to_datetime(["2023-01-01", "2023-01-01", "2023-01-02", "2023-01-03", "2023-01-04"])
     df = pd.DataFrame({"consumption_kwh": [2.0, 4.0, -1.0, 5.0, 6.0]}, index=idx)
     out = clean_series(df)
     # Duplicate timestamp averaged, negative row dropped, gap interpolated.
