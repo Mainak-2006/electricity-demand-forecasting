@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
-import streamlit as st 
+import streamlit as st
 
 import service
 from report import render_html
