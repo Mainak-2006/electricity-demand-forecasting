@@ -37,3 +37,47 @@ jobs:
 
       - name: Test (pytest)
         run: uv run pytest
+
+  docker:
+    name: Docker build & smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      # The image bakes in artifacts/ (best_model.pt, scaler.joblib), so train a
+      # throwaway model first; 2 epochs is enough to serve a valid /health.
+      - name: Train a throwaway model for the image
+        run: |
+          uv run python generate_data.py
+          uv run python train.py --epochs 2
+
+      - name: Build image
+        run: docker build -t bijli-predict-ai:ci .
+
+      - name: Smoke test /health
+        run: |
+          docker run -d --name bijli-ci -p 8000:8000 bijli-predict-ai:ci
+          ready=0
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/health > /dev/null; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != "1" ]; then
+            docker logs bijli-ci
+            exit 1
+          fi
+          curl -fsS http://127.0.0.1:8000/health
+          docker stop bijli-ci

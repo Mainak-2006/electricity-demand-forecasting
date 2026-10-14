@@ -187,3 +187,80 @@ def test_projection(client):
     assert body["monthly_30d"]["days"] == 30
     assert body["three_month_90d"]["days"] == 30
     assert body["daily"][-1]["cumulative_cost_inr"] > body["daily"][0]["cumulative_cost_inr"]
+
+
+# --- hardening: API key, rate limit, payload caps ----------------------------
+
+
+def _app(artifacts, **kwargs):
+    model_path, scaler_path, calib_path = artifacts
+    return api.create_app(
+        model_path=str(model_path),
+        scaler_path=str(scaler_path),
+        calibration_path=str(calib_path),
+        device="cpu",
+        **kwargs,
+    )
+
+
+def test_api_key_required_when_configured(artifacts):
+    with TestClient(_app(artifacts, api_key="s3cret")) as c:
+        assert c.get("/health").status_code == 200  # health stays open
+        assert c.post("/forecast", json={"history_kwh": _history()}).status_code == 401
+        assert c.post(
+            "/forecast", json={"history_kwh": _history()}, headers={"X-API-Key": "wrong"}
+        ).status_code == 401
+        ok = c.post(
+            "/forecast", json={"history_kwh": _history()}, headers={"X-API-Key": "s3cret"}
+        )
+        assert ok.status_code == 200
+
+
+def test_api_key_from_environment(artifacts, monkeypatch):
+    monkeypatch.setenv("BIJLI_API_KEY", "env-secret")
+    with TestClient(_app(artifacts)) as c:
+        assert c.post("/projection", json={"history_kwh": _history()}).status_code == 401
+        ok = c.post(
+            "/projection",
+            json={"history_kwh": _history()},
+            headers={"X-API-Key": "env-secret"},
+        )
+        assert ok.status_code == 200
+
+
+def test_open_when_no_api_key(artifacts, monkeypatch):
+    monkeypatch.delenv("BIJLI_API_KEY", raising=False)
+    with TestClient(_app(artifacts)) as c:
+        assert c.post("/forecast", json={"history_kwh": _history()}).status_code == 200
+
+
+def test_rate_limit_returns_429(artifacts):
+    with TestClient(_app(artifacts, rate_limit=3)) as c:
+        payload = {"history_kwh": _history()}
+        assert [c.post("/forecast", json=payload).status_code for _ in range(3)] == [200] * 3
+        throttled = c.post("/forecast", json=payload)
+        assert throttled.status_code == 429
+        assert int(throttled.headers["Retry-After"]) >= 1
+        assert c.get("/health").status_code == 200  # exempt from the limiter
+
+
+def test_body_size_limit_returns_413(artifacts):
+    with TestClient(_app(artifacts, max_body_bytes=16)) as c:
+        resp = c.post("/forecast", json={"history_kwh": _history()})
+        assert resp.status_code == 413
+
+
+def test_history_length_capped(artifacts):
+    with TestClient(_app(artifacts)) as c:
+        resp = c.post("/forecast", json={"history_kwh": [1.0] * (api.DEFAULT_MAX_HISTORY + 1)})
+        assert resp.status_code == 422
+
+
+def test_rate_limiter_primitive():
+    limiter = api.RateLimiter(limit=2)
+    assert limiter.check("1.2.3.4")[0] is True
+    assert limiter.check("1.2.3.4")[0] is True
+    allowed, retry = limiter.check("1.2.3.4")
+    assert allowed is False and retry > 0
+    assert limiter.check("5.6.7.8")[0] is True  # separate key unaffected
+    assert api.RateLimiter(limit=0).check("x") == (True, 0.0)  # disabled

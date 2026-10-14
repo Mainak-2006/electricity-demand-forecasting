@@ -1,8 +1,11 @@
-# Keep the build context lean.
+# Keep the build context lean. The Dockerfile COPYs pyproject.toml, uv.lock,
+# README.md and then the source tree, so nothing needed to build or serve may
+# appear below (notably README.md and artifacts/ must stay in context).
 .venv/
 venv/
 .git/
 .gitignore
+.gitattributes
 .github/
 __pycache__/
 *.py[cod]
@@ -11,10 +14,18 @@ build/
 dist/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 .ipynb_checkpoints/
 notebooks/
+*.ipynb
 outputs/
 data/raw/
 PHASES.md
+CONTRIBUTING.md
+LICENSE
+.vscode/
+.idea/
 .dockerignore
 compose*.yml
