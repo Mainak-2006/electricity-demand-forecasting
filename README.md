@@ -337,11 +337,32 @@ curl -s localhost:8000/forecast -H 'content-type: application/json' \
 
 `POST /forecast` takes `history_kwh` (≥ the model's input length, e.g. 30),
 optional `horizon`, `last_date`, and per-request `rate / slab / preset / fixed /
-tax_pct`. The model, scaler and calibration paths come from
-`BIJLI_MODEL_PATH` / `BIJLI_SCALER_PATH` / `BIJLI_CALIBRATION_PATH` (defaults:
-`artifacts/…`) and `BIJLI_DEVICE`. Invalid input (too-short history, NaN,
-unknown preset, bad slab grammar) returns a structured **422**. The response
-mirrors `outputs/` — same numbers as `predict.py`.
+tax_pct`. Invalid input (too-short history, NaN, unknown preset, bad slab
+grammar) returns a structured **422**. The response mirrors `outputs/` — same
+numbers as `predict.py`.
+
+#### Hardening
+
+| Env var | Default | Effect |
+| --- | --- | --- |
+| `BIJLI_MODEL_PATH` / `BIJLI_SCALER_PATH` / `BIJLI_CALIBRATION_PATH` | `artifacts/…` | where the app loads model, scaler, intervals |
+| `BIJLI_DEVICE` | `cpu` | `auto` \| `cpu` \| `cuda` |
+| `BIJLI_API_KEY` | *(unset)* | when set, `POST` routes require a matching `X-API-Key` header (constant-time compare); unset keeps the service open for local use |
+| `BIJLI_RATE_LIMIT` | `60` | max `POST`s per minute per client IP (`0` disables) |
+| `BIJLI_MAX_BODY_BYTES` | `65536` | reject oversized request bodies (**413**) |
+
+`/`, `/health` and the interactive docs stay **unauthenticated** and are exempt
+from the rate limiter, so container health checks and discovery keep working.
+`history_kwh` is additionally capped at 2000 values. Failures are explicit:
+**401** bad/missing key, **429** (with `Retry-After`) too many requests, **413**
+body too large.
+
+```bash
+BIJLI_API_KEY=s3cret uvicorn api:app --port 8000
+
+curl -s localhost:8000/forecast -H 'content-type: application/json' \
+  -H 'X-API-Key: s3cret' -d '{"history_kwh": [3.1, 2.9, 3.4, /* … */]}'
+```
 
 ### Streamlit dashboard
 
@@ -366,7 +387,43 @@ docker run -p 8000:8000 bijli-predict-ai     # or bind-mount fresh artifacts:
 The image is CPU-only (torch from the PyTorch CPU wheel index), installs just
 the `serve` extra from the lockfile, and ships a `HEALTHCHECK` against
 `/health`. `artifacts/` is git-ignored, so a fresh clone must train first (or
-mount artifacts) before the container will report healthy.
+mount artifacts) before the container will report healthy. CI builds the image,
+trains a throwaway two-epoch model and smoke-tests `/health` in a container.
+
+---
+
+## Synthetic data
+
+`generate_data.py` (or `bijli data`) writes a reproducible Indian household
+dataset: daily kWh plus a synthetic Delhi temperature series, with **load coupled
+to temperature** so the `weather` feature set has real signal to learn from.
+
+```bash
+python generate_data.py                       # 3 years, one household (wide format)
+python generate_data.py --households 3        # 3 households (long format)
+python generate_data.py --no-couple-weather   # pure day-of-year seasonality
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--start` / `--days` | `2023-01-01` / `1095` | date range |
+| `--households` | `1` | >1 switches to long format (`date,household,consumption_kwh`) |
+| `--city` | `delhi` | names the synthetic temperature column/cache |
+| `--no-couple-weather` | off | fixed seasonal profile instead of temperature-driven load |
+| `--weather-out` | `data/raw/weather/<city>.csv` | where the synthetic temperature is cached |
+| `--raw-out` / `--processed-out` | `data/raw/synthetic_household.csv` / `data/processed/daily_consumption.csv` | output CSVs |
+| `--sample-input` | `data/sample_input.csv` | last-30-day history consumed by `predict.py` |
+
+Weather coupling is explicit: cooling degree-days (**T above 24 °C**) scale the
+summer AC peak and heating degree-days (**T below 18 °C**) scale the winter
+geyser bump, each with a per-household random coefficient — so no two households
+respond to temperature identically.
+
+**Multiple households.** With `--households > 1` the processed CSV becomes
+**long format** and training pools sliding windows across every household,
+fitting one scaler on the pooled *training* rows. Downstream commands that assume
+a single series (rolling-origin CV, `evaluate --cv rolling`, and `predict`) detect
+this and exit with an actionable error rather than silently mis-forecasting.
 
 ---
 
@@ -392,7 +449,14 @@ python train.py --data data/processed/daily_consumption.csv
 ```
 
 `iawe_ingest.py` integrates the instantaneous active power (`W`) of the main
-meter(s) over time into daily kWh.
+meter(s) over time into daily kWh. Point it at several households at once and it
+emits the same long format the multi-household generator produces, one
+`household` per directory:
+
+```bash
+python iawe_ingest.py --dir data/raw/iawe/home_a data/raw/iawe/home_b
+python train.py --data data/processed/daily_consumption.csv
+```
 
 > **Data limitation:** iAWE covers only ~73 days from a single household — too
 > short for a reliable, generalisable model. It is useful as a smoke test, which
@@ -592,7 +656,7 @@ uv run bijli evaluate --cv rolling
 
 ```text
 bijli-predict-ai/
-├── .github/workflows/ci.yml     # ruff + pytest on Python 3.12 / 3.14
+├── .github/workflows/ci.yml     # ruff + pytest (3.12/3.14) + Docker smoke test
 ├── data/
 │   ├── raw/                     # source CSVs (synthetic or iAWE) + weather/ cache
 │   ├── processed/               # daily_consumption.csv
@@ -634,9 +698,12 @@ bijli-predict-ai/
 ├── evaluate.py                  # metrics + baselines + plot
 ├── predict.py                   # 7-day consumption + cost forecast
 ├── Dockerfile                   # slim CPU-only API image
+├── .dockerignore                # keep the build context small
 ├── Makefile                     # task runner
 ├── pyproject.toml               # deps, scripts, ruff + pytest config
 ├── requirements.txt
+├── CONTRIBUTING.md              # dev setup, style, PR checklist
+├── LICENSE                      # MIT
 └── uv.lock                      # locked dependency resolution
 ```
 
@@ -669,4 +736,12 @@ so repeated runs produce identical artifacts.
 - Input CSVs are validated up front (see *Data validation & run manifests*), and
   every run writes a provenance manifest with input hashes and the git revision.
 - This is a reproducible forecasting experiment with a thin local serving layer —
-  not a hardened, authenticated production service.
+  not a multi-tenant production service. Optional API-key auth, per-IP rate
+  limiting and payload caps are provided (see *Hardening*), but there is no TLS,
+  user management or persistence.
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE) © 2026 Mainak-2006.
