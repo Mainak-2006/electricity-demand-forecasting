@@ -13,6 +13,7 @@ Public API:
     chronological_split(df, ...)           -> {'train','val','test'} DataFrames
     make_windows(arr, input_len, horizon)  -> (X, y) numpy arrays
     load_and_prepare(path, ...)            -> prepared arrays + scaler + frames
+    prepare_full_series(path, ...)         -> windows over the whole series (no split)
 
 Exogenous features (calendar / holidays / temperature, see `features.py`) are
 threaded through as optional extra input channels: when a `FeatureConfig` is
@@ -31,7 +32,7 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
-from features import FeatureConfig, build_feature_matrix
+from features import FeatureConfig, build_feature_matrix, temperature_for_dates
 
 DEFAULT_INPUT_LEN = 30
 DEFAULT_HORIZON = 7
@@ -290,6 +291,59 @@ def load_and_prepare(
         "series": series,
         "input_len": input_len,
         "horizon": horizon,
+    }
+
+
+def prepare_full_series(
+    path: str | Path,
+    input_len: int = DEFAULT_INPUT_LEN,
+    horizon: int = DEFAULT_HORIZON,
+    scaler: StandardScaler | None = None,
+    fill_limit: int = 14,
+    feature_config: FeatureConfig | None = None,
+    temperature: pd.DataFrame | None = None,
+    feature_scaler: StandardScaler | None = None,
+    weather_file: str | Path | None = None,
+) -> dict:
+    """Build sliding windows over the *entire* cleaned series (no splitting).
+
+    Unlike :func:`load_and_prepare` this performs no train/val/test split: the
+    series is cleaned as a single block and windows are built end-to-end. The
+    caller supplies the training-time `scaler` (and `feature_scaler`) so inputs
+    match training exactly, and selects per-fold window ranges itself - this is
+    the primitive the rolling-origin evaluation builds on.
+
+    When ``feature_config.temperature`` is set and no `temperature` frame is
+    given, the Open-Meteo series is fetched (with the required leading buffer).
+    Returns ``X/y``, the cleaned `series` and its `index`.
+    """
+    if scaler is None:
+        raise ValueError("prepare_full_series requires a fitted `scaler`.")
+    deduped = _dedupe_series(load_consumption(path))
+    series = _fill_daily_gaps(deduped, fill_limit)["consumption_kwh"]
+    scaled = _scale(series.to_numpy(), scaler)
+
+    feature_columns: list[str] = []
+    feats: np.ndarray | None = None
+    if feature_config is not None and feature_config.enabled:
+        if temperature is None and feature_config.temperature:
+            temperature = temperature_for_dates(
+                feature_config, series.index, weather_file=weather_file
+            )
+        feature_matrix, feature_columns = build_feature_matrix(
+            series.index, temperature=temperature, config=feature_config
+        )
+        if feature_scaler is None:
+            raise ValueError("features requested but no feature_scaler supplied.")
+        feats = feature_scaler.transform(feature_matrix.to_numpy())
+
+    X, y = make_windows(scaled, input_len, horizon, features=feats)
+    return {
+        "X": X,
+        "y": y,
+        "series": series,
+        "index": series.index,
+        "feature_columns": feature_columns,
     }
 
 

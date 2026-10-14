@@ -213,6 +213,37 @@ the current GRU lands at **80.3% / 89.6%**.
 
 ---
 
+## Rolling-origin evaluation
+
+A single chronological test split is a noisy estimate of generalisation. Pass
+`--cv rolling` to additionally score the frozen model over **expanding-window
+rolling-origin** folds: the splitter (`cv.py`) sweeps a fixed-size test window
+forward through the series, each fold paired with the training prefix that
+precedes it. Folds are anchored at the train/val boundary so every fold is fully
+out-of-sample, and the loaded checkpoint is reused (no per-fold retraining).
+Results are written to `outputs/evaluation_cv.json` with per-fold metrics plus
+the **mean ± std** across folds:
+
+```
+$ uv run bijli evaluate --cv rolling --cv-folds 5
+...
+Rolling-origin CV (5 folds, 1163d min train):
+ fold  windows      MAE     RMSE     WAPE
+    0       35    0.631    0.931    10.77
+    1       35    0.630    0.772     9.17
+    2       35    0.880    1.241    12.24
+    3       35    0.580    0.718     8.89
+    4       35    0.720    1.005    12.87
+WAPE across folds: 10.79% +/- 1.59%
+Saved: outputs/evaluation_cv.json
+```
+
+Per-fold WAPE spans ~8.9–12.9%, so the fold spread (±1.6%) is a more honest
+uncertainty band than the single-split point estimate — which sits right in the
+middle of it.
+
+---
+
 ## Using real data
 
 The pipeline is dataset-agnostic: any CSV with a date column and a consumption
@@ -258,6 +289,7 @@ meter(s) over time into daily kWh.
 | `outputs/cost_summary.json` | Bill breakdown + monthly & 3-month projection + interval ranges |
 | `outputs/bijli_report.xlsx` | Multi-sheet Excel report (auto-built by `predict.py`) |
 | `outputs/evaluation.json` | MAE / RMSE / WAPE, baseline comparison, coverage |
+| `outputs/evaluation_cv.json` | Per-fold + mean/std metrics (`evaluate.py --cv rolling`) |
 
 ## Cost prediction
 
@@ -373,10 +405,24 @@ baselines:
 - **MAPE** — mean absolute percentage error
 
 Baselines: **seasonal-naive (period 7)** — repeat the last observed week — and
-**persistence** — repeat the last observed day.
+**persistence** — repeat the last observed day. With the optional `stats` extra
+(`pip install .[stats]`), two classical models are added as rolling 7-day
+forecasts from each test origin, scored on the same windows as the neural model:
+**SARIMAX** `(1,1,1)(1,0,0,7)` (state advanced with each observation via
+`append`, no refit) and **ETS** (Holt-Winters, additive weekly seasonality,
+refit per origin).
 
-On the default synthetic dataset the GRU beats both baselines
-(e.g. WAPE ≈ 10.7% vs ≈ 14.0% for seasonal-naive and ≈ 17.0% for persistence).
+On the default synthetic dataset the GRU beats the naive baselines
+(WAPE ≈ 10.7% vs ≈ 14.0% seasonal-naive and ≈ 17.0% persistence), but a plain
+**ETS** baseline is competitive-to-better on the single test split (≈ 9.8%),
+with SARIMAX at ≈ 11.4%. That the synthetic annual cycle is largely captured by
+classical smoothing is exactly why the rolling-origin numbers in
+`evaluation_cv.json` matter more than any single-split ranking.
+
+```bash
+pip install '.[stats]'          # or: uv pip install statsmodels
+uv run bijli evaluate --cv rolling
+```
 
 ---
 
@@ -394,13 +440,14 @@ bijli-predict-ai/
 │   ├── gru_model.py             # primary model
 │   └── lstm_model.py            # comparison model
 ├── tests/                       # pytest suite (cli, tariffs, preprocessing,
-│                                #   inference, weather, features, calibration)
+│                                #   inference, weather, features, calibration,
+│                                #   cv, baselines)
 ├── artifacts/                   # best_model.pt, scaler.joblib,
 │                                #   feature_scaler.joblib, calibration.json
 ├── outputs/                     # predictions.csv, forecast.png, evaluation.json,
-│                                #   cost_forecast.png, cost_projection.png,
-│                                #   projection_90d.csv, cost_summary.json,
-│                                #   bijli_report.xlsx
+│                                #   evaluation_cv.json, cost_forecast.png,
+│                                #   cost_projection.png, projection_90d.csv,
+│                                #   cost_summary.json, bijli_report.xlsx
 ├── cli.py                       # unified `bijli` entry point
 ├── config.toml                  # hyperparameters / defaults (tomllib)
 ├── tariff_presets.toml          # named discom tariffs
@@ -408,6 +455,8 @@ bijli-predict-ai/
 ├── features.py                  # calendar / holiday / temperature features
 ├── weather.py                   # Open-Meteo archive + forecast + climatology
 ├── calibration.py               # split-conformal prediction intervals
+├── cv.py                        # rolling-origin CV splitter
+├── baselines.py                 # SARIMAX / ETS statistical baselines
 ├── generate_data.py             # synthetic Indian household generator
 ├── iawe_ingest.py               # real iAWE -> daily kWh
 ├── tariffs.py                   # flat / slab / preset / fixed / tax bill calculation

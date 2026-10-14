@@ -23,6 +23,9 @@ dev = [
 notebook = [
     "jupyter==1.1.1",
 ]
+stats = [
+    "statsmodels>=0.14",
+]
 
 [project.scripts]
 bijli = "cli:main"
@@ -37,8 +40,10 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["models"]
 py-modules = [
+    "baselines",
     "calibration",
     "cli",
+    "cv",
     "evaluate",
     "features",
     "generate_data",

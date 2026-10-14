@@ -36,6 +36,8 @@ splits = [0.70, 0.15, 0.15]
 calibration_out = "artifacts/calibration.json"  # conformal intervals
 calibration_scale = "power"   # absolute | power (sigma = yhat ** gamma)
 calibration_gamma = 0.5       # variance-stabilising exponent for household load
+cv = "none"                   # none | rolling (expanding-window origin CV)
+cv_folds = 5                  # folds for --cv rolling
 
 [predict]
 device = "cpu"

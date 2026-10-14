@@ -5,8 +5,13 @@ baselines:
     * seasonal-naive (period 7): repeat the last observed week
     * persistence: repeat the last observed day
 
+With the optional `stats` extra installed, SARIMAX and ETS block forecasts are
+reported alongside. Passing ``--cv rolling`` additionally evaluates the frozen
+model over expanding-window rolling-origin folds.
+
 Outputs:
-    outputs/evaluation.json
+    outputs/evaluation.json      (single-split metrics + coverage)
+    outputs/evaluation_cv.json   (per-fold + mean/std metrics, with --cv rolling)
     outputs/forecast.png
 """
 
@@ -23,10 +28,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+import baselines
 import calibration
+import cv
 from features import temperature_for_dates
 from inference import feature_info, load_model, predict, resolve_device
-from preprocessing import load_and_prepare, load_consumption, load_scaler
+from preprocessing import load_and_prepare, load_consumption, load_scaler, prepare_full_series
 
 DEFAULT_DATA = "data/processed/daily_consumption.csv"
 DEFAULT_ARTIFACTS = "artifacts"
@@ -46,6 +53,120 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
     wape = float(np.sum(np.abs(err)) / (denom + EPS) * 100.0)
     mape = float(np.mean(np.abs(err) / np.maximum(np.abs(y_true), EPS)) * 100.0)
     return {"mae": mae, "rmse": rmse, "wape": wape, "mape": mape}
+
+
+def window_metrics(model, X, y, scaler, device) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Predict a set of scaled windows and score them in kWh.
+
+    Returns ``(y_true, y_pred, metrics)``; predictions are clipped at zero
+    because household consumption cannot be negative.
+    """
+    pred_scaled = predict(model, X, device)
+    y_true = scaler.inverse_transform(y.reshape(-1, 1)).reshape(y.shape)
+    y_pred = np.clip(
+        scaler.inverse_transform(pred_scaled.reshape(-1, 1)).reshape(pred_scaled.shape), 0.0, None
+    )
+    return y_true, y_pred, compute_metrics(y_true, y_pred)
+
+
+def stats_baselines(
+    train_values, test_values, y_true, input_len: int, horizon: int
+) -> dict[str, dict[str, float]]:
+    """SARIMAX / ETS rolling forecasts scored on the model's test windows.
+
+    Both baselines forecast ``horizon`` days from each test window's origin, so
+    their metrics are directly comparable to the model's. Returns ``{}`` when
+    the optional `stats` extra is unavailable; individual entries carry an
+    ``"error"`` key if a model fails to fit.
+    """
+    if not baselines.statsmodels_available():
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    for name in ("sarimax", "ets"):
+        try:
+            pred = baselines.rolling_block(
+                np.asarray(train_values, dtype=float).reshape(-1),
+                np.asarray(test_values, dtype=float).reshape(-1),
+                input_len,
+                horizon,
+                name,
+            )
+        except Exception as exc:  # pragma: no cover - depends on optional dep
+            out[name] = {"error": str(exc)}
+            continue
+        out[name] = compute_metrics(y_true, pred)
+    return out
+
+
+def rolling_cv(
+    args,
+    model,
+    scaler,
+    device,
+    input_len: int,
+    horizon: int,
+    feature_config,
+    feature_scaler,
+    prepared: dict,
+) -> dict:
+    """Evaluate the frozen model over rolling-origin folds.
+
+    Folds are anchored at the train/val boundary so every fold is fully
+    out-of-sample; the loaded checkpoint is reused (no per-fold retraining).
+    Windows whose whole target falls inside a fold's test range are scored.
+    """
+    full = prepare_full_series(
+        args.data,
+        input_len=input_len,
+        horizon=horizon,
+        scaler=scaler,
+        feature_config=feature_config,
+        feature_scaler=feature_scaler,
+        weather_file=args.weather_file,
+    )
+    n = len(full["series"])
+    train_end = len(prepared["frames"]["train"]) + len(prepared["frames"]["val"])
+    train_end = min(max(train_end, 1), n - 1)
+
+    folds = cv.rolling_origin_splits(
+        n,
+        n_folds=args.cv_folds,
+        test_size=args.cv_test_size,
+        min_train_size=train_end,
+    )
+    X_all, y_all = full["X"], full["y"]
+    rows: list[dict] = []
+    for fold in folds:
+        lo = max(0, fold.test_start - input_len)
+        hi = min(len(X_all), fold.test_end - input_len - horizon + 1)
+        if hi <= lo:
+            continue
+        _, _, metrics = window_metrics(model, X_all[lo:hi], y_all[lo:hi], scaler, device)
+        rows.append(
+            {
+                "fold": fold.index,
+                "train_end": fold.train_end,
+                "test_start": fold.test_start,
+                "test_end": fold.test_end,
+                "test_windows": int(hi - lo),
+                "metrics": metrics,
+            }
+        )
+    if not rows:
+        raise SystemExit("Rolling CV produced no evaluable folds - dataset too short.")
+
+    keys = ("mae", "rmse", "wape", "mape")
+    return {
+        "method": "rolling-origin",
+        "n_folds": len(rows),
+        "min_train_size": train_end,
+        "series_length": n,
+        "wape_mean": float(np.mean([r["metrics"]["wape"] for r in rows])),
+        "wape_std": float(np.std([r["metrics"]["wape"] for r in rows])),
+        "metric_means": {k: float(np.mean([r["metrics"][k] for r in rows])) for k in keys},
+        "metric_stds": {k: float(np.std([r["metrics"][k] for r in rows])) for k in keys},
+        "folds": rows,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -77,6 +198,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--weather-file",
         default=None,
         help="pre-fetched weather CSV to use instead of the Open-Meteo cache",
+    )
+    p.add_argument(
+        "--cv",
+        default="none",
+        choices=["none", "rolling"],
+        help="cross-validation scheme (rolling = expanding-window origin CV)",
+    )
+    p.add_argument("--cv-folds", type=int, default=5, help="number of rolling-origin CV folds")
+    p.add_argument(
+        "--cv-test-size",
+        type=int,
+        default=None,
+        help="test-window length (days) per CV fold (default: even split)",
+    )
+    p.add_argument(
+        "--cv-out",
+        default=None,
+        help="where to write evaluation_cv.json (default: <out-dir>/evaluation_cv.json)",
+    )
+    p.add_argument(
+        "--no-stats-baselines",
+        action="store_true",
+        help="skip the SARIMAX/ETS baselines (also skipped if the stats extra is missing)",
     )
     return p
 
@@ -161,6 +305,23 @@ def main(args: argparse.Namespace | None = None) -> None:
     }
     per_horizon_mae = [float(np.mean(np.abs(y_true[:, k] - y_pred[:, k]))) for k in range(horizon)]
 
+    # --- Statistical baselines (optional; rolling SARIMAX / ETS forecasts) ---
+    stats = {}
+    if not args.no_stats_baselines:
+        train_values = np.concatenate(
+            [
+                prepared["frames"]["train"]["consumption_kwh"].to_numpy(),
+                prepared["frames"]["val"]["consumption_kwh"].to_numpy(),
+            ]
+        )
+        stats = stats_baselines(
+            train_values,
+            prepared["frames"]["test"]["consumption_kwh"].to_numpy(),
+            y_true,
+            input_len,
+            horizon,
+        )
+
     # --- Reconstruct a per-date series by averaging overlapping forecasts ---
     dates = prepared["frames"]["test"].index
     pred_sum: dict = defaultdict(float)
@@ -228,6 +389,8 @@ def main(args: argparse.Namespace | None = None) -> None:
         },
         "per_horizon_mae": per_horizon_mae,
     }
+    if stats:
+        result["stats_baselines"] = stats
     if coverage is not None:
         result["calibration"] = {
             "method": calib["method"],
@@ -239,6 +402,23 @@ def main(args: argparse.Namespace | None = None) -> None:
         }
     json_path = out_dir / "evaluation.json"
     json_path.write_text(json.dumps(result, indent=2))
+
+    # --- Rolling-origin cross-validation (optional) ---
+    cv_result = None
+    if args.cv == "rolling":
+        cv_result = rolling_cv(
+            args,
+            model,
+            scaler,
+            device,
+            input_len,
+            horizon,
+            feature_config,
+            feature_scaler,
+            prepared,
+        )
+        cv_path = Path(args.cv_out) if args.cv_out else out_dir / "evaluation_cv.json"
+        cv_path.write_text(json.dumps(cv_result, indent=2))
 
     # --- Report ---
     print(f"Model: {ckpt['model_type'].upper()}   test windows: {len(X_test)}   horizon: {horizon}")
@@ -264,6 +444,32 @@ def main(args: argparse.Namespace | None = None) -> None:
                 f"{c['target'] * 100:>9.0f}%{c['empirical'] * 100:>11.1f}%{c['mean_width']:>12.3f}"
             )
         print(f"Saved: {args.calibration_out}")
+    if stats:
+        scored = {k: v for k, v in stats.items() if "error" not in v}
+        if scored:
+            print("\nStatistical baselines (rolling 7-day forecasts):")
+            header = f"{'metric':<10}" + "".join(f"{name:>12}" for name in scored)
+            print(header)
+            for m in ("mae", "rmse", "wape", "mape"):
+                print(f"{m.upper():<10}" + "".join(f"{v[m]:>12.3f}" for v in scored.values()))
+        for name, v in stats.items():
+            if "error" in v:
+                print(f"  ({name}: unavailable - {v['error']})")
+    if cv_result is not None:
+        print(
+            f"\nRolling-origin CV ({cv_result['n_folds']} folds, "
+            f"{cv_result['min_train_size']}d min train):"
+        )
+        print(f"{'fold':>5}{'windows':>9}{'MAE':>9}{'RMSE':>9}{'WAPE':>9}")
+        for r in cv_result["folds"]:
+            m = r["metrics"]
+            print(
+                f"{r['fold']:>5}{r['test_windows']:>9}"
+                f"{m['mae']:>9.3f}{m['rmse']:>9.3f}{m['wape']:>9.2f}"
+            )
+        print(f"WAPE across folds: {cv_result['wape_mean']:.2f}% +/- {cv_result['wape_std']:.2f}%")
+        cv_out = Path(args.cv_out) if args.cv_out else out_dir / "evaluation_cv.json"
+        print(f"Saved: {cv_out}")
     print(f"\nSaved: {json_path}")
     print(f"Saved: {plot_path}")
 
